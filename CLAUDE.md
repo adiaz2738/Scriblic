@@ -16,6 +16,9 @@ tool, no real-time collaboration.
   element variant would slow iteration more than it'd help).
 - **@neondatabase/serverless** for Postgres access (HTTP-based driver, no
   connection pooling to manage).
+- **@vercel/blob** for image storage — uploads go through
+  `app/api/upload/route.ts`, which stores the file and returns a URL for
+  the image element's `src`.
 - **lucide-react** for icons. No CSS framework — everything is inline styles
   plus a small `<style>` block per component. This is intentional, matching
   the original design; don't introduce Tailwind unless you're doing a
@@ -30,6 +33,7 @@ app/
   login/page.tsx            password gate UI (only relevant if APP_PASSWORD set)
   api/boards/route.ts        GET (list) / POST (create)
   api/boards/[id]/route.ts   GET / PUT (save) / DELETE
+  api/upload/route.ts        POST — uploads an image to Vercel Blob, returns { url }
   api/login/route.ts         checks APP_PASSWORD, sets cookie
   layout.tsx, globals.css
 components/
@@ -86,10 +90,10 @@ or normalize the field names project-wide (touches element creation,
 
 ## Known limitations (see SETUP.md for the user-facing version)
 
-- Images are base64-encoded directly into the `elements` jsonb column. Fine
-  for a handful of images; will bloat rows if used heavily. The contained
-  fix is swapping `handleImageFileChosen` in `Whiteboard.tsx` to upload to
-  Vercel Blob and store a URL instead of a data URL.
+- Images now upload to Vercel Blob and only a URL is stored in the
+  `elements` jsonb column. Deleting an image element does not currently
+  delete its Blob object, so an orphaned file is left behind — a good
+  future cleanup task, not something to fix now.
 - Embeds (`type: "embed"`) render an `<iframe>` — many sites block this via
   `X-Frame-Options`. Not fixable from this side.
 - No realtime collaboration. Last write wins if the same board is open in

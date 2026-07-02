@@ -118,6 +118,9 @@ const WEIGHT_TYPES = ["rectangle", "diamond", "ellipse", "line", "arrow", "freeh
 const SKETCH_TYPES = ["rectangle", "diamond", "ellipse", "line", "arrow"];
 const STROKELESS_TYPES = ["image", "embed"];
 const BOX_TYPES = ["rectangle", "diamond", "ellipse", "text", "image", "embed", "link"];
+const LABELABLE_TYPES = ["rectangle", "diamond", "ellipse"];
+const EDGE_TYPES = ["rectangle", "diamond"];
+const EDGES = [{ label: "Sharp", value: "sharp" }, { label: "Round", value: "round" }];
 
 /* ---------------------------------------------------------------
    Geometry / sketch helpers
@@ -154,6 +157,49 @@ function sketchyPath(points, seed, roughnessKey, closed) {
     }
   }
   return d;
+}
+function cornerCuts(points, radius) {
+  const n = points.length;
+  return points.map((p, i) => {
+    const prev = points[(i - 1 + n) % n];
+    const next = points[(i + 1) % n];
+    const toPrev = [prev[0] - p[0], prev[1] - p[1]];
+    const toNext = [next[0] - p[0], next[1] - p[1]];
+    const lenPrev = Math.hypot(toPrev[0], toPrev[1]) || 1;
+    const lenNext = Math.hypot(toNext[0], toNext[1]) || 1;
+    const r = Math.min(radius, lenPrev / 2, lenNext / 2);
+    return {
+      p,
+      a: [p[0] + (toPrev[0] / lenPrev) * r, p[1] + (toPrev[1] / lenPrev) * r],
+      b: [p[0] + (toNext[0] / lenNext) * r, p[1] + (toNext[1] / lenNext) * r],
+    };
+  });
+}
+function sketchyRoundedPath(points, seed, roughnessKey, radius) {
+  const { amp, passes } = roughnessInfo(roughnessKey);
+  const rand = seededRandom(seed || 1);
+  const n = points.length;
+  const corners = cornerCuts(points, radius);
+  let d = "";
+  for (let pass = 0; pass < passes; pass++) {
+    for (let i = 0; i < n; i++) {
+      const from = corners[i];
+      const to = corners[(i + 1) % n];
+      d += jitteredSegment(from.b[0], from.b[1], to.a[0], to.a[1], rand, amp) + " ";
+      d += `M ${to.a[0].toFixed(2)} ${to.a[1].toFixed(2)} Q ${to.p[0].toFixed(2)} ${to.p[1].toFixed(2)} ${to.b[0].toFixed(2)} ${to.b[1].toFixed(2)} `;
+    }
+  }
+  return d;
+}
+function roundedPolygonPath(points, radius) {
+  const n = points.length;
+  const corners = cornerCuts(points, radius);
+  let d = `M ${corners[0].b[0].toFixed(2)} ${corners[0].b[1].toFixed(2)} `;
+  for (let i = 1; i <= n; i++) {
+    const c = corners[i % n];
+    d += `L ${c.a[0].toFixed(2)} ${c.a[1].toFixed(2)} Q ${c.p[0].toFixed(2)} ${c.p[1].toFixed(2)} ${c.b[0].toFixed(2)} ${c.b[1].toFixed(2)} `;
+  }
+  return d + "Z";
 }
 function ellipsePoints(cx, cy, rx, ry, segments = 20) {
   const pts = [];
@@ -226,18 +272,18 @@ function measureText(text, fontSize) {
 }
 function createShapeElement(type, x, y, style) {
   const base = { id: genId(), type, stroke: style.stroke, fill: style.fill, strokeWidth: style.strokeWidth, roughness: style.roughness, opacity: style.opacity, seed: Math.floor(Math.random() * 100000) + 1 };
-  if (type === "rectangle" || type === "diamond" || type === "ellipse") return { ...base, x, y, w: 0, h: 0 };
+  if (type === "rectangle" || type === "diamond" || type === "ellipse") return { ...base, x, y, w: 0, h: 0, edges: style.edges };
   if (type === "line" || type === "arrow") return { ...base, points: [{ x, y }, { x, y }] };
   if (type === "freehand") return { ...base, points: [{ x, y }] };
   return base;
 }
-function loadAndDownscaleImage(file) {
-  return new Promise<{ dataUrl: string; width: number; height: number }>((resolve, reject) => {
+function downscaleImageFile(file) {
+  return new Promise<{ blob: Blob; width: number; height: number; mime: string }>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
       const img = new Image();
       img.onload = () => {
-        const maxDim = 1400;
+        const maxDim = 1600;
         let { width, height } = img;
         if (width > maxDim || height > maxDim) {
           const scale = Math.min(maxDim / width, maxDim / height);
@@ -250,15 +296,15 @@ function loadAndDownscaleImage(file) {
         const ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0, width, height);
         const keepPng = file.type === "image/png" || file.type === "image/svg+xml";
-        let dataUrl;
-        try {
-          dataUrl = keepPng ? canvas.toDataURL("image/png") : canvas.toDataURL("image/jpeg", 0.85);
-          if (dataUrl.length > 3000000) dataUrl = canvas.toDataURL("image/jpeg", 0.55);
-        } catch (err) {
-          reject(err);
-          return;
-        }
-        resolve({ dataUrl, width: canvas.width, height: canvas.height });
+        const mime = keepPng ? "image/png" : "image/jpeg";
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) { reject(new Error("Could not process image")); return; }
+            resolve({ blob, width: canvas.width, height: canvas.height, mime });
+          },
+          mime,
+          keepPng ? undefined : 0.86
+        );
       };
       img.onerror = reject;
       img.src = reader.result as string;
@@ -271,25 +317,53 @@ function loadAndDownscaleImage(file) {
 /* ---------------------------------------------------------------
    Shape renderer
 ----------------------------------------------------------------*/
-function ShapeSvg({ el, theme, isEmbedInteracting }) {
+function ShapeLabel({ el, hidden }) {
+  if (!el.label || hidden) return null;
+  const cx = el.x + el.w / 2;
+  const cy = el.y + el.h / 2;
+  const fontSize = el.labelFontSize || 16;
+  const lines = el.label.split("\n");
+  const lineHeight = fontSize * 1.3;
+  const startY = cy - ((lines.length - 1) * lineHeight) / 2;
+  return (
+    <text x={cx} y={startY} textAnchor="middle" dominantBaseline="middle" fontFamily="'Kalam', cursive" fontSize={fontSize} fill={el.stroke} style={{ userSelect: "none" }}>
+      {lines.map((line, i) => (
+        <tspan key={i} x={cx} y={startY + i * lineHeight}>{line || " "}</tspan>
+      ))}
+    </text>
+  );
+}
+function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel }) {
   const { type, seed, roughness } = el;
   if (type === "rectangle") {
     const pts = [[el.x, el.y], [el.x + el.w, el.y], [el.x + el.w, el.y + el.h], [el.x, el.y + el.h]];
-    const d = sketchyPath(pts, seed, roughness, true);
+    const radius = el.edges === "round" ? Math.min(28, Math.min(el.w, el.h) * 0.16) : 0;
+    const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        {el.fill !== "transparent" && <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={el.fill} stroke="none" />}
+        {el.fill !== "transparent" && (
+          radius > 0
+            ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
+            : <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={el.fill} stroke="none" />
+        )}
         <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+        <ShapeLabel el={el} hidden={hideLabel} />
       </>
     );
   }
   if (type === "diamond") {
     const pts = [[el.x + el.w / 2, el.y], [el.x + el.w, el.y + el.h / 2], [el.x + el.w / 2, el.y + el.h], [el.x, el.y + el.h / 2]];
-    const d = sketchyPath(pts, seed, roughness, true);
+    const radius = el.edges === "round" ? Math.min(22, Math.min(el.w, el.h) * 0.14) : 0;
+    const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        {el.fill !== "transparent" && <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={el.fill} stroke="none" />}
+        {el.fill !== "transparent" && (
+          radius > 0
+            ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
+            : <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={el.fill} stroke="none" />
+        )}
         <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+        <ShapeLabel el={el} hidden={hideLabel} />
       </>
     );
   }
@@ -301,6 +375,7 @@ function ShapeSvg({ el, theme, isEmbedInteracting }) {
       <>
         {el.fill !== "transparent" && <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill={el.fill} stroke="none" />}
         <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+        <ShapeLabel el={el} hidden={hideLabel} />
       </>
     );
   }
@@ -385,12 +460,13 @@ export default function Whiteboard({ board, boardList }) {
   const [canvasBg, setCanvasBg] = useState(board.canvasBg || CANVAS_BACKGROUNDS[0].value);
   const [selectedIds, setSelectedIds] = useState([]);
   const [tool, setTool] = useState("select");
-  const [style, setStyle] = useState({ stroke: STROKE_COLORS[0].value, fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20 });
+  const [style, setStyle] = useState({ stroke: STROKE_COLORS[0].value, fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, edges: "sharp" });
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [marquee, setMarquee] = useState(null);
   const [cursorWorld, setCursorWorld] = useState({ x: 0, y: 0 });
   const [editingText, setEditingText] = useState(null);
+  const [editingLabel, setEditingLabel] = useState(null);
   const [linkDraft, setLinkDraft] = useState(null);
   const [embedDraft, setEmbedDraft] = useState(null);
   const [embedUrlInput, setEmbedUrlInput] = useState("");
@@ -412,6 +488,7 @@ export default function Whiteboard({ board, boardList }) {
   const snapshotRef = useRef(null);
   const spaceHeldRef = useRef(false);
   const textareaRef = useRef(null);
+  const labelTextareaRef = useRef(null);
   const imageInputRef = useRef(null);
   const jsonInputRef = useRef(null);
   const saveTimerRef = useRef(null);
@@ -436,6 +513,13 @@ export default function Whiteboard({ board, boardList }) {
       textareaRef.current.select();
     }
   }, [editingText?.id]);
+
+  useEffect(() => {
+    if (editingLabel && labelTextareaRef.current) {
+      labelTextareaRef.current.focus();
+      labelTextareaRef.current.select();
+    }
+  }, [editingLabel?.id]);
 
   useEffect(() => {
     if (!toast) return;
@@ -663,6 +747,35 @@ export default function Whiteboard({ board, boardList }) {
     }
   }, []);
 
+  const finishLabelEdit = useCallback(
+    (commit) => {
+      setEditingLabel((draft) => {
+        if (!draft) return null;
+        if (commit) {
+          const text = draft.text.trim();
+          beginChange();
+          setElements((prev) =>
+            prev.map((el) => {
+              if (el.id !== draft.id) return el;
+              if (text === "") return { ...el, label: undefined };
+              const b = getBBox(el);
+              const labelFontSize = Math.max(12, Math.min(28, Math.min(b.w, b.h) * 0.22));
+              return { ...el, label: text, labelFontSize };
+            })
+          );
+          endChange();
+        }
+        return null;
+      });
+    },
+    [beginChange, endChange]
+  );
+
+  const startLabelEdit = useCallback((el) => {
+    const b = getBBox(el);
+    setEditingLabel({ id: el.id, x: b.x, y: b.y, w: b.w, h: b.h, text: el.label || "", fontSize: el.labelFontSize || 16, stroke: el.stroke });
+  }, []);
+
   const onWindowPointerMove = useCallback(
     (e) => {
       const { x, y } = screenToWorld(e.clientX, e.clientY);
@@ -786,6 +899,7 @@ export default function Whiteboard({ board, boardList }) {
   const handleCanvasPointerDown = useCallback(
     (e) => {
       if (editingText) finishTextEdit(true);
+      if (editingLabel) finishLabelEdit(true);
       if (linkDraft) setLinkDraft(null);
       if (embedDraft) setEmbedDraft(null);
       if (interactingEmbedId) setInteractingEmbedId(null);
@@ -824,7 +938,7 @@ export default function Whiteboard({ board, boardList }) {
       setElements((prev) => [...prev, el]);
       beginDrag({ mode: "shape-draw", id: el.id, startX: x, startY: y });
     },
-    [beginChange, beginDrag, editingText, embedDraft, finishTextEdit, interactingEmbedId, linkDraft, projectsPanelOpen, refreshProjects, screenToWorld, startTextAt]
+    [beginChange, beginDrag, editingLabel, editingText, embedDraft, finishLabelEdit, finishTextEdit, interactingEmbedId, linkDraft, projectsPanelOpen, refreshProjects, screenToWorld, startTextAt]
   );
 
   const handleShapePointerDown = useCallback(
@@ -832,7 +946,9 @@ export default function Whiteboard({ board, boardList }) {
       if (toolRef.current !== "select") return;
       e.stopPropagation();
       if (editingText) finishTextEdit(true);
+      if (editingLabel) finishLabelEdit(true);
 
+      if (LABELABLE_TYPES.includes(el.type) && e.detail === 2) { startLabelEdit(el); return; }
       if (el.type === "text" && e.detail === 2) { startTextAt(el.x, el.y, el); return; }
       if (el.type === "link" && e.detail === 2) {
         if (el.targetId === boardId) return;
@@ -857,7 +973,7 @@ export default function Whiteboard({ board, boardList }) {
       beginChange();
       beginDrag({ mode: "move", startX: x, startY: y, origins });
     },
-    [beginChange, beginDrag, boardId, editingText, finishTextEdit, goToBoard, screenToWorld, startTextAt]
+    [beginChange, beginDrag, boardId, editingLabel, editingText, finishLabelEdit, finishTextEdit, goToBoard, screenToWorld, startLabelEdit, startTextAt]
   );
 
   const handleResizePointerDown = useCallback(
@@ -940,21 +1056,28 @@ export default function Whiteboard({ board, boardList }) {
       const file = e.target.files && e.target.files[0];
       e.target.value = "";
       if (!file) return;
+      setToast("Uploading image…");
       try {
-        const { dataUrl, width, height } = await loadAndDownscaleImage(file);
+        const { blob, width, height, mime } = await downscaleImageFile(file);
+        const form = new FormData();
+        form.append("file", blob, `image.${mime === "image/png" ? "png" : "jpg"}`);
+        const res = await fetch("/api/upload", { method: "POST", body: form });
+        const data = await res.json();
+        if (!res.ok || !data.url) throw new Error(data.error || "Upload failed");
         const rect = containerRef.current.getBoundingClientRect();
         const wx = (rect.width / 2 - panRef.current.x) / zoomRef.current;
         const wy = (rect.height / 2 - panRef.current.y) / zoomRef.current;
         const w = Math.min(400, width);
         const h = w * (height / width);
-        const newEl = { id: genId(), type: "image", x: wx - w / 2, y: wy - h / 2, w, h, src: dataUrl, opacity: 1 };
+        const newEl = { id: genId(), type: "image", x: wx - w / 2, y: wy - h / 2, w, h, src: data.url, opacity: 1 };
         beginChange();
         setElements((prev) => [...prev, newEl]);
         endChange();
         setSelectedIds([newEl.id]);
         setTool("select");
-      } catch (err) {
-        setToast("Could not load that image");
+        setToast(null);
+      } catch (err: any) {
+        setToast(err.message || "Could not upload that image");
       }
     },
     [beginChange, endChange]
@@ -1157,7 +1280,7 @@ export default function Whiteboard({ board, boardList }) {
           {elements.map((el) =>
             editingText && editingText.id === el.id ? null : (
               <g key={el.id} opacity={el.opacity} onPointerDown={(e) => handleShapePointerDown(e, el)} style={{ cursor: tool === "select" ? "move" : "inherit" }}>
-                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} />
+                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} />
               </g>
             )
           )}
@@ -1205,6 +1328,24 @@ export default function Whiteboard({ board, boardList }) {
             minWidth: 60, minHeight: editingText.fontSize * zoom * 1.4,
             width: Math.max(120, measureText(editingText.text || " ", editingText.fontSize).width * zoom),
             height: Math.max(40, measureText(editingText.text || " ", editingText.fontSize).height * zoom + 10),
+            overflow: "hidden",
+          }}
+        />
+      )}
+
+      {editingLabel && (
+        <textarea
+          ref={labelTextareaRef}
+          value={editingLabel.text}
+          onChange={(e) => setEditingLabel((d) => ({ ...d, text: e.target.value }))}
+          onBlur={() => finishLabelEdit(true)}
+          onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Escape") { e.currentTarget.blur(); finishLabelEdit(false); } }}
+          style={{
+            position: "absolute", left: worldToScreen(editingLabel.x, editingLabel.y).x, top: worldToScreen(editingLabel.x, editingLabel.y).y,
+            width: editingLabel.w * zoom, height: editingLabel.h * zoom, boxSizing: "border-box",
+            fontFamily: "'Kalam', cursive", fontSize: editingLabel.fontSize * zoom, lineHeight: `${editingLabel.fontSize * zoom * 1.3}px`, color: editingLabel.stroke,
+            textAlign: "center", background: "transparent", border: "1px dashed #4C5FF7", resize: "none", outline: "none",
+            padding: `${Math.max(0, (editingLabel.h * zoom - editingLabel.text.split("\n").length * editingLabel.fontSize * zoom * 1.3) / 2)}px 4px`,
             overflow: "hidden",
           }}
         />
@@ -1264,8 +1405,8 @@ export default function Whiteboard({ board, boardList }) {
         <button className={`tb-btn${tool === "embed" ? " active" : ""}`} title="Embed a web page" onClick={() => setTool("embed")}><Globe size={18} /></button>
       </div>
 
-      <div style={{ position: "absolute", top: 20, left: 20, display: "flex", gap: 8 }}>
-        <button onClick={() => router.push("/")} title="All boards" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 38, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 12, boxShadow: theme.shadow, cursor: "pointer" }}>
+      <div style={{ position: "absolute", top: 20, left: 20, display: "flex", gap: 8, alignItems: "flex-start" }}>
+        <button onClick={() => router.push("/")} title="All boards" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 38, height: 38, flexShrink: 0, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 12, boxShadow: theme.shadow, cursor: "pointer" }}>
           <Home size={16} color={theme.muted} />
         </button>
         <div>
@@ -1276,7 +1417,7 @@ export default function Whiteboard({ board, boardList }) {
           </button>
 
           {projectsPanelOpen && (
-            <div onPointerDown={(e) => e.stopPropagation()} style={{ marginTop: 6, width: 260, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 14, boxShadow: theme.shadow, padding: 10, zIndex: 30 }}>
+            <div onPointerDown={(e) => e.stopPropagation()} style={{ position: "relative", marginTop: 6, width: 260, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 14, boxShadow: theme.shadow, padding: 10, zIndex: 30 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
                 <div className="panel-label" style={{ margin: 0 }}>Boards</div>
                 <button className="icon-btn-sm" onClick={() => addProject()}><Plus size={14} /></button>
@@ -1387,6 +1528,17 @@ export default function Whiteboard({ board, boardList }) {
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 {ROUGHNESS.map((r) => (
                   <button key={r.value} className={`seg-btn${style.roughness === r.value ? " on" : ""}`} style={{ width: "100%" }} onClick={() => updateSelectedStyle({ roughness: r.value })}>{r.label}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {EDGE_TYPES.includes(effectiveType) && (
+            <div>
+              <div className="panel-label">Corners</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {EDGES.map((opt) => (
+                  <button key={opt.value} className={`seg-btn${style.edges === opt.value ? " on" : ""}`} style={{ width: "100%" }} onClick={() => updateSelectedStyle({ edges: opt.value })}>{opt.label}</button>
                 ))}
               </div>
             </div>

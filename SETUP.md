@@ -45,7 +45,34 @@ npm install
 
 ---
 
-## 3. Configure your local environment
+## 3. Set up Vercel Blob (image storage)
+
+Images you insert on a board are uploaded to [Vercel Blob](https://vercel.com/docs/storage/vercel-blob)
+rather than stored inline, so you need a Blob store connected before image
+uploads will work.
+
+1. Go to your project on [vercel.com](https://vercel.com) (if you haven't
+   created/imported it yet, you can come back to this after step 6 below —
+   just leave `BLOB_READ_WRITE_TOKEN` blank for now).
+2. Open the **Storage** tab and click **Create Database** → **Blob**.
+3. Give the store a name and connect it to this project. Vercel will
+   automatically inject `BLOB_READ_WRITE_TOKEN` into your project's
+   production and preview environments — no manual copy-pasting needed there.
+4. For local development, pull that value down instead of typing it by hand:
+   ```bash
+   npx vercel link
+   npx vercel env pull .env.local
+   ```
+   This fills in `BLOB_READ_WRITE_TOKEN` (and `DATABASE_URL`, if you've also
+   added it in Vercel) in your local `.env.local`.
+
+If you'd rather configure `.env.local` by hand before connecting Vercel,
+that's fine too — just leave `BLOB_READ_WRITE_TOKEN` blank until step 3.3
+above gives you a token to paste in.
+
+---
+
+## 4. Configure your local environment
 
 1. Copy the example env file:
    ```bash
@@ -55,11 +82,13 @@ npm install
    ```
    DATABASE_URL=postgresql://user:password@ep-something-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require
    ```
-3. Leave `APP_PASSWORD` blank for now (see [Password protection](#password-protection) below).
+3. Paste your Blob token as `BLOB_READ_WRITE_TOKEN` (from step 3 above), or
+   run `vercel env pull .env.local` to fetch it automatically.
+4. Leave `APP_PASSWORD` blank for now (see [Password protection](#password-protection) below).
 
 ---
 
-## 4. Run it locally
+## 5. Run it locally
 
 ```bash
 npm run dev
@@ -69,11 +98,12 @@ Open [http://localhost:3000](http://localhost:3000). You should see an empty
 board dashboard. Click **New board** to create one and start drawing.
 
 If you see "Can't reach the database," double-check `DATABASE_URL` and that
-you ran `schema.sql` in step 2.6.
+you ran `schema.sql` in step 2.6. If inserting an image fails, double-check
+`BLOB_READ_WRITE_TOKEN`.
 
 ---
 
-## 5. Push it to GitHub
+## 6. Push it to GitHub
 
 ```bash
 git init
@@ -92,7 +122,7 @@ git push -u origin main
 
 ---
 
-## 6. Deploy to Vercel
+## 7. Deploy to Vercel
 
 1. Go to [vercel.com/new](https://vercel.com/new) and import the GitHub
    repo you just pushed.
@@ -100,6 +130,9 @@ git push -u origin main
 3. Before deploying, open the **Environment Variables** section and add:
    - `DATABASE_URL` → the same Neon connection string from step 2.4
    - `APP_PASSWORD` → optional, see below
+   - `BLOB_READ_WRITE_TOKEN` → only needed here if you didn't connect the
+     Blob store to this project already in step 3 (in which case Vercel
+     already injected it for you)
 4. Click **Deploy**.
 
 Once it finishes, you'll get a URL like `whiteboard-app.vercel.app`. That's
@@ -127,14 +160,10 @@ add other people to it.
 
 ## Known limitations, honestly stated
 
-- **Images are stored as base64 inside the board's JSON**, which is simple
-  but not efficient — a board with several photos will produce a large
-  database row. Fine for diagrams and a handful of images; if you start
-  pasting in lots of photos, the next upgrade is moving image storage to
-  [Vercel Blob](https://vercel.com/docs/storage/vercel-blob) and just
-  storing a URL in the element instead of the base64 data. That's a
-  contained change — swap the upload handler in `components/Whiteboard.tsx`
-  to upload to Blob and store the returned URL.
+- **Images upload to Vercel Blob and store a URL** in the board's JSON.
+  Deleting an image element from a board does not currently delete its
+  underlying Blob object, so removed images leave an orphaned file behind —
+  a reasonable cleanup task later, not a functional problem today.
 - **Embeds** (the globe tool) rely on the target site allowing itself to be
   put in an iframe. Many sites block this (`X-Frame-Options`). Nothing to
   fix here — it's a property of the embedded site.
@@ -172,7 +201,7 @@ features — so it works as-is on Supabase.
 See `CLAUDE.md` for a project-structure brief written for handing this off
 to Claude Code. A few concrete next steps if you want ideas:
 
-- Move image storage to Vercel Blob (see above)
+- Clean up orphaned Blob files when an image element is deleted
 - Add board thumbnails to the dashboard cards
 - Add a "duplicate board" action
 - Add full-text search across board names/content
