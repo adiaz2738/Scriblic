@@ -84,8 +84,8 @@ const FILL_COLORS = [
 
 const STROKE_WIDTHS = [
   { label: "S", value: 1.5 },
-  { label: "M", value: 2.5 },
-  { label: "L", value: 4 },
+  { label: "M", value: 3.5 },
+  { label: "L", value: 7 },
 ];
 
 const FONT_SIZES = [
@@ -121,6 +121,19 @@ const BOX_TYPES = ["rectangle", "diamond", "ellipse", "text", "image", "embed", 
 const LABELABLE_TYPES = ["rectangle", "diamond", "ellipse"];
 const EDGE_TYPES = ["rectangle", "diamond"];
 const EDGES = [{ label: "Sharp", value: "sharp" }, { label: "Round", value: "round" }];
+
+function relativeLuminance(hex) {
+  const c = hex.replace("#", "");
+  const r = parseInt(c.substring(0, 2), 16) / 255;
+  const g = parseInt(c.substring(2, 4), 16) / 255;
+  const b = parseInt(c.substring(4, 6), 16) / 255;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+function defaultStrokeForBg(bgHex) {
+  const paper = STROKE_COLORS.find((c) => c.name === "Paper").value;
+  const graphite = STROKE_COLORS.find((c) => c.name === "Graphite").value;
+  return relativeLuminance(bgHex) < 0.5 ? paper : graphite;
+}
 
 /* ---------------------------------------------------------------
    Geometry / sketch helpers
@@ -265,6 +278,79 @@ function hitTestPoint(el, x, y, threshold) {
   }
   return false;
 }
+function rectBoundaryPoint(bbox, fromX, fromY) {
+  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
+  const dx = fromX - cx, dy = fromY - cy;
+  if (dx === 0 && dy === 0) return { x: cx, y: cy };
+  const scaleX = (bbox.w / 2) / (Math.abs(dx) || 1e-6);
+  const scaleY = (bbox.h / 2) / (Math.abs(dy) || 1e-6);
+  const scale = Math.min(scaleX, scaleY);
+  return { x: cx + dx * scale, y: cy + dy * scale };
+}
+function diamondBoundaryPoint(bbox, fromX, fromY) {
+  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
+  const dx = fromX - cx, dy = fromY - cy;
+  const denom = Math.abs(dx) / (bbox.w / 2 || 1e-6) + Math.abs(dy) / (bbox.h / 2 || 1e-6);
+  const scale = denom === 0 ? 0 : 1 / denom;
+  return { x: cx + dx * scale, y: cy + dy * scale };
+}
+function ellipseBoundaryPoint(bbox, fromX, fromY) {
+  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
+  const rx = bbox.w / 2, ry = bbox.h / 2;
+  const dx = fromX - cx, dy = fromY - cy;
+  const denom = Math.sqrt((dx * dx) / (rx * rx || 1e-6) + (dy * dy) / (ry * ry || 1e-6));
+  const scale = denom === 0 ? 0 : 1 / denom;
+  return { x: cx + dx * scale, y: cy + dy * scale };
+}
+function getBindPoint(el, fromX, fromY, gap = 6) {
+  const bbox = getBBox(el);
+  const pt =
+    el.type === "diamond" ? diamondBoundaryPoint(bbox, fromX, fromY) :
+    el.type === "ellipse" ? ellipseBoundaryPoint(bbox, fromX, fromY) :
+    rectBoundaryPoint(bbox, fromX, fromY); // rectangle, image, embed, link
+  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
+  const dx = pt.x - cx, dy = pt.y - cy;
+  const len = Math.hypot(dx, dy) || 1;
+  return { x: pt.x + (dx / len) * gap, y: pt.y + (dy / len) * gap };
+}
+const BINDABLE_TYPES = ["rectangle", "diamond", "ellipse", "image", "embed", "link"];
+function findBindTarget(elements, x, y, excludeId) {
+  for (let i = elements.length - 1; i >= 0; i--) {
+    const el = elements[i];
+    if (el.id === excludeId || !BINDABLE_TYPES.includes(el.type)) continue;
+    if (hitTestPoint(el, x, y, 6)) return el;
+  }
+  return null;
+}
+function centerOf(el) {
+  const b = getBBox(el);
+  return { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+}
+function updateBoundArrows(elements, updatedIds) {
+  const byId = new Map(elements.map((el) => [el.id, el]));
+  return elements.map((el) => {
+    if (el.type !== "arrow" || (!el.startBinding && !el.endBinding)) return el;
+    const startBoundUpdated = el.startBinding && updatedIds.has(el.startBinding.elementId);
+    const endBoundUpdated = el.endBinding && updatedIds.has(el.endBinding.elementId);
+    if (!startBoundUpdated && !endBoundUpdated) return el;
+    let [p0, p1] = el.points;
+    if (startBoundUpdated) {
+      const target = byId.get(el.startBinding.elementId);
+      if (target) {
+        const other = el.endBinding ? centerOf(byId.get(el.endBinding.elementId) || target) : p1;
+        p0 = getBindPoint(target, other.x, other.y);
+      }
+    }
+    if (endBoundUpdated) {
+      const target = byId.get(el.endBinding.elementId);
+      if (target) {
+        const other = el.startBinding ? centerOf(byId.get(el.startBinding.elementId) || target) : p0;
+        p1 = getBindPoint(target, other.x, other.y);
+      }
+    }
+    return { ...el, points: [p0, p1] };
+  });
+}
 function measureText(text, fontSize) {
   const lines = text.split("\n");
   const longest = Math.max(1, ...lines.map((l) => l.length));
@@ -333,7 +419,7 @@ function ShapeLabel({ el, hidden }) {
     </text>
   );
 }
-function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel }) {
+function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick }) {
   const { type, seed, roughness } = el;
   if (type === "rectangle") {
     const pts = [[el.x, el.y], [el.x + el.w, el.y], [el.x + el.w, el.y + el.h], [el.x, el.y + el.h]];
@@ -341,6 +427,7 @@ function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel }) {
     const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
+        <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent") e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         {el.fill !== "transparent" && (
           radius > 0
             ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
@@ -357,6 +444,7 @@ function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel }) {
     const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
+        <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent") e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         {el.fill !== "transparent" && (
           radius > 0
             ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
@@ -373,6 +461,7 @@ function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel }) {
     const d = sketchyPath(pts, seed, roughness, true);
     return (
       <>
+        <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent") e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         {el.fill !== "transparent" && <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill={el.fill} stroke="none" />}
         <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
         <ShapeLabel el={el} hidden={hideLabel} />
@@ -464,6 +553,7 @@ export default function Whiteboard({ board, boardList }) {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [marquee, setMarquee] = useState(null);
+  const [hoverBindTargetId, setHoverBindTargetId] = useState(null);
   const [cursorWorld, setCursorWorld] = useState({ x: 0, y: 0 });
   const [editingText, setEditingText] = useState(null);
   const [editingLabel, setEditingLabel] = useState(null);
@@ -480,6 +570,7 @@ export default function Whiteboard({ board, boardList }) {
   const svgRef = useRef(null);
   const elementsRef = useRef(elements);
   const canvasBgRef = useRef(canvasBg);
+  const lastDefaultStrokeRef = useRef(STROKE_COLORS[0].value);
   const panRef = useRef(pan);
   const zoomRef = useRef(zoom);
   const styleRef = useRef(style);
@@ -682,6 +773,22 @@ export default function Whiteboard({ board, boardList }) {
     [beginChange, endChange]
   );
 
+  const applyCanvasBackground = useCallback(
+    (newBg) => {
+      const newDefaultStroke = defaultStrokeForBg(newBg);
+      if (newDefaultStroke !== lastDefaultStrokeRef.current) {
+        const oldDefault = lastDefaultStrokeRef.current;
+        beginChange();
+        setElements((prev) => prev.map((el) => (el.stroke === oldDefault ? { ...el, stroke: newDefaultStroke } : el)));
+        endChange();
+        setStyle((s) => ({ ...s, stroke: newDefaultStroke }));
+        lastDefaultStrokeRef.current = newDefaultStroke;
+      }
+      setCanvasBg(newBg);
+    },
+    [beginChange, endChange]
+  );
+
   const deleteSelected = useCallback(() => {
     if (selectedIdsRef.current.length === 0) return;
     beginChange();
@@ -798,6 +905,10 @@ export default function Whiteboard({ board, boardList }) {
             return el;
           })
         );
+        if (drag.arrowDraw) {
+          const target = findBindTarget(elementsRef.current, x, y, drag.id);
+          setHoverBindTargetId(target ? target.id : null);
+        }
         return;
       }
       if (drag.mode === "freehand-draw") {
@@ -806,19 +917,21 @@ export default function Whiteboard({ board, boardList }) {
       }
       if (drag.mode === "move") {
         const dx = x - drag.startX, dy = y - drag.startY;
-        setElements((prev) =>
-          prev.map((el) => {
+        setElements((prev) => {
+          const movedIds = new Set(Object.keys(drag.origins));
+          const next = prev.map((el) => {
             const orig = drag.origins[el.id];
             if (!orig) return el;
             if (orig.points) return { ...el, points: orig.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
             return { ...el, x: orig.x + dx, y: orig.y + dy };
-          })
-        );
+          });
+          return updateBoundArrows(next, movedIds);
+        });
         return;
       }
       if (drag.mode === "resize") {
-        setElements((prev) =>
-          prev.map((el) => {
+        setElements((prev) => {
+          const next = prev.map((el) => {
             if (el.id !== drag.id) return el;
             if (el.type === "line" || el.type === "arrow") {
               const pts = [...drag.originPoints];
@@ -833,8 +946,13 @@ export default function Whiteboard({ board, boardList }) {
             if (h.includes("w")) { nw = Math.max(4, o.x + o.w - x); nx = o.x + o.w - nw; }
             if (h.includes("n")) { nh = Math.max(4, o.y + o.h - y); ny = o.y + o.h - nh; }
             return { ...el, x: nx, y: ny, w: nw, h: nh };
-          })
-        );
+          });
+          return updateBoundArrows(next, new Set([drag.id]));
+        });
+        if (drag.arrowEndpointResize) {
+          const target = findBindTarget(elementsRef.current, x, y, drag.id);
+          setHoverBindTargetId(target ? target.id : null);
+        }
         return;
       }
       if (drag.mode === "marquee") {
@@ -862,10 +980,31 @@ export default function Whiteboard({ board, boardList }) {
           setElements((prev) => prev.filter((e) => e.id !== drag.id));
           snapshotRef.current = null;
         } else {
+          if (el && el.type === "arrow") {
+            setElements((prev) =>
+              prev.map((e) => {
+                if (e.id !== drag.id) return e;
+                let [p0, p1] = e.points;
+                let startBinding = null, endBinding = null;
+                const startTarget = findBindTarget(prev, p0.x, p0.y, e.id);
+                if (startTarget) {
+                  startBinding = { elementId: startTarget.id };
+                  p0 = getBindPoint(startTarget, p1.x, p1.y);
+                }
+                const endTarget = findBindTarget(prev, p1.x, p1.y, e.id);
+                if (endTarget) {
+                  endBinding = { elementId: endTarget.id };
+                  p1 = getBindPoint(endTarget, p0.x, p0.y);
+                }
+                return { ...e, points: [p0, p1], startBinding, endBinding };
+              })
+            );
+          }
           endChange();
           setSelectedIds([drag.id]);
         }
         setTool("select");
+        setHoverBindTargetId(null);
       } else if (drag.mode === "freehand-draw") {
         const el = elementsRef.current.find((e) => e.id === drag.id);
         if (el && el.points.length < 2) {
@@ -877,6 +1016,26 @@ export default function Whiteboard({ board, boardList }) {
         }
         setTool("select");
       } else if (drag.mode === "move" || drag.mode === "resize" || drag.mode === "erase") {
+        if (drag.mode === "resize" && drag.arrowEndpointResize) {
+          const el = elementsRef.current.find((e) => e.id === drag.id);
+          if (el && el.type === "arrow") {
+            const point = el.points[drag.handle];
+            const bindKey = drag.handle === 0 ? "startBinding" : "endBinding";
+            const otherPoint = el.points[drag.handle === 0 ? 1 : 0];
+            const target = findBindTarget(elementsRef.current, point.x, point.y, el.id);
+            setElements((prev) =>
+              prev.map((e) => {
+                if (e.id !== el.id) return e;
+                if (!target) return { ...e, [bindKey]: null };
+                const snapped = getBindPoint(target, otherPoint.x, otherPoint.y);
+                const pts = [...e.points];
+                pts[drag.handle] = snapped;
+                return { ...e, points: pts, [bindKey]: { elementId: target.id } };
+              })
+            );
+          }
+          setHoverBindTargetId(null);
+        }
         endChange();
       } else if (drag.mode === "marquee") {
         setMarquee(null);
@@ -936,7 +1095,7 @@ export default function Whiteboard({ board, boardList }) {
       const el = createShapeElement(t, x, y, styleRef.current);
       beginChange();
       setElements((prev) => [...prev, el]);
-      beginDrag({ mode: "shape-draw", id: el.id, startX: x, startY: y });
+      beginDrag({ mode: "shape-draw", id: el.id, startX: x, startY: y, arrowDraw: t === "arrow" });
     },
     [beginChange, beginDrag, editingLabel, editingText, embedDraft, finishLabelEdit, finishTextEdit, interactingEmbedId, linkDraft, projectsPanelOpen, refreshProjects, screenToWorld, startTextAt]
   );
@@ -948,7 +1107,6 @@ export default function Whiteboard({ board, boardList }) {
       if (editingText) finishTextEdit(true);
       if (editingLabel) finishLabelEdit(true);
 
-      if (LABELABLE_TYPES.includes(el.type) && e.detail === 2) { startLabelEdit(el); return; }
       if (el.type === "text" && e.detail === 2) { startTextAt(el.x, el.y, el); return; }
       if (el.type === "link" && e.detail === 2) {
         if (el.targetId === boardId) return;
@@ -973,7 +1131,7 @@ export default function Whiteboard({ board, boardList }) {
       beginChange();
       beginDrag({ mode: "move", startX: x, startY: y, origins });
     },
-    [beginChange, beginDrag, boardId, editingLabel, editingText, finishLabelEdit, finishTextEdit, goToBoard, screenToWorld, startLabelEdit, startTextAt]
+    [beginChange, beginDrag, boardId, editingLabel, editingText, finishLabelEdit, finishTextEdit, goToBoard, screenToWorld, startTextAt]
   );
 
   const handleResizePointerDown = useCallback(
@@ -981,7 +1139,7 @@ export default function Whiteboard({ board, boardList }) {
       e.stopPropagation();
       beginChange();
       if (el.type === "line" || el.type === "arrow") {
-        beginDrag({ mode: "resize", id: el.id, handle, originPoints: el.points.map((p) => ({ ...p })) });
+        beginDrag({ mode: "resize", id: el.id, handle, originPoints: el.points.map((p) => ({ ...p })), arrowEndpointResize: el.type === "arrow" });
       } else {
         beginDrag({ mode: "resize", id: el.id, handle, origin: { x: el.x, y: el.y, w: el.w, h: el.h } });
       }
@@ -1003,6 +1161,10 @@ export default function Whiteboard({ board, boardList }) {
           setPan((p) => ({ x: cx - ((cx - p.x) / z) * nz, y: cy - ((cy - p.y) / z) * nz }));
           return nz;
         });
+      } else if (e.shiftKey) {
+        setPan((p) => ({ x: p.x - e.deltaY, y: p.y }));
+      } else if (e.altKey) {
+        setPan((p) => ({ x: p.x, y: p.y - e.deltaY }));
       } else {
         setPan((p) => ({ x: p.x - e.deltaX, y: p.y - e.deltaY }));
       }
@@ -1233,12 +1395,13 @@ export default function Whiteboard({ board, boardList }) {
 
   const sortedProjects = [...projects].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 
-  function toggleTheme() {
-    setIsDark((d) => {
-      const next = !d;
-      window.localStorage.setItem("board-theme", next ? "dark" : "light");
-      return next;
-    });
+  function setTheme(dark) {
+    setIsDark(dark);
+    window.localStorage.setItem("board-theme", dark ? "dark" : "light");
+    const bg = dark
+      ? CANVAS_BACKGROUNDS.find((c) => c.name === "Slate").value
+      : CANVAS_BACKGROUNDS.find((c) => c.name === "Paper").value;
+    applyCanvasBackground(bg);
   }
 
   const saveLabel = saveStatus === "saving" ? "Saving…" : saveStatus === "error" ? "Save failed" : saveStatus === "idle" ? "Unsaved" : "Saved";
@@ -1280,7 +1443,7 @@ export default function Whiteboard({ board, boardList }) {
           {elements.map((el) =>
             editingText && editingText.id === el.id ? null : (
               <g key={el.id} opacity={el.opacity} onPointerDown={(e) => handleShapePointerDown(e, el)} style={{ cursor: tool === "select" ? "move" : "inherit" }}>
-                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} />
+                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} onLabelDoubleClick={(target) => { if (toolRef.current === "select") startLabelEdit(target); }} />
               </g>
             )
           )}
@@ -1297,6 +1460,26 @@ export default function Whiteboard({ board, boardList }) {
               {multiBBox && <rect x={multiBBox.x - 8} y={multiBBox.y - 8} width={multiBBox.w + 16} height={multiBBox.h + 16} fill="none" stroke="#4C5FF7" strokeWidth={1 / zoom} rx={6 / zoom} />}
             </g>
           )}
+
+          {hoverBindTargetId && (() => {
+            const target = elements.find((e) => e.id === hoverBindTargetId);
+            if (!target) return null;
+            const b = getBBox(target);
+            const mid = [
+              { x: b.x + b.w / 2, y: b.y },
+              { x: b.x + b.w, y: b.y + b.h / 2 },
+              { x: b.x + b.w / 2, y: b.y + b.h },
+              { x: b.x, y: b.y + b.h / 2 },
+            ];
+            return (
+              <g pointerEvents="none">
+                <rect x={b.x - 4} y={b.y - 4} width={b.w + 8} height={b.h + 8} fill="none" stroke="#4C5FF7" strokeWidth={1.5 / zoom} strokeDasharray={`${4 / zoom} ${3 / zoom}`} rx={4 / zoom} />
+                {mid.map((p, i) => (
+                  <circle key={i} cx={p.x} cy={p.y} r={6 / zoom} stroke="#4C5FF7" strokeWidth={1.5 / zoom} fill="white" />
+                ))}
+              </g>
+            );
+          })()}
         </g>
       </svg>
 
@@ -1441,13 +1624,13 @@ export default function Whiteboard({ board, boardList }) {
                 <div className="panel-label">Background</div>
                 <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
                   {CANVAS_BACKGROUNDS.map((c) => (
-                    <div key={c.value} className={`swatch${canvasBg === c.value ? " selected" : ""}`} style={{ background: c.value, border: c.value === "#FFFFFF" ? "1px solid #E6E6E1" : "2px solid transparent" }} title={c.name} onClick={() => setCanvasBg(c.value)} />
+                    <div key={c.value} className={`swatch${canvasBg === c.value ? " selected" : ""}`} style={{ background: c.value, border: c.value === "#FFFFFF" ? "1px solid #E6E6E1" : "2px solid transparent" }} title={c.name} onClick={() => applyCanvasBackground(c.value)} />
                   ))}
                 </div>
                 <div className="panel-label">Theme</div>
                 <div style={{ display: "flex", gap: 4 }}>
-                  <button className={`seg-btn${!isDark ? " on" : ""}`} onClick={toggleTheme} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}><Sun size={13} /> Light</button>
-                  <button className={`seg-btn${isDark ? " on" : ""}`} onClick={toggleTheme} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}><Moon size={13} /> Dark</button>
+                  <button className={`seg-btn${!isDark ? " on" : ""}`} onClick={() => setTheme(false)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}><Sun size={13} /> Light</button>
+                  <button className={`seg-btn${isDark ? " on" : ""}`} onClick={() => setTheme(true)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}><Moon size={13} /> Dark</button>
                 </div>
               </div>
             </div>
