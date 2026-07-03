@@ -9,7 +9,7 @@ export function getSql() {
     );
   }
   if (!cached) {
-    cached = neon(process.env.DATABASE_URL);
+    cached = neon(process.env.DATABASE_URL, { fetchOptions: { cache: "no-store" } });
   }
   return cached;
 }

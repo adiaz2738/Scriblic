@@ -14,6 +14,8 @@ export type Board = {
   elements: any[];
   createdAt: string;
   updatedAt: string;
+  shareToken: string | null;
+  isPublic: boolean;
 };
 
 function rowToBoard(row: any): Board {
@@ -24,6 +26,8 @@ function rowToBoard(row: any): Board {
     elements: row.elements ?? [],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    shareToken: row.share_token ?? null,
+    isPublic: row.is_public ?? false,
   };
 }
 
@@ -72,4 +76,24 @@ export async function updateBoard(
 export async function deleteBoard(id: string): Promise<void> {
   const sql = getSql();
   await sql`delete from boards where id = ${id}`;
+}
+
+export async function getBoardByShareToken(token: string): Promise<Board | null> {
+  const sql = getSql();
+  const rows = await sql`select * from boards where share_token = ${token} and is_public = true limit 1`;
+  if (rows.length === 0) return null;
+  return rowToBoard(rows[0]);
+}
+
+export async function setBoardSharing(id: string, isPublic: boolean): Promise<Board | null> {
+  const sql = getSql();
+  const rows = await sql`
+    update boards set
+      is_public = ${isPublic},
+      share_token = case when ${isPublic} and share_token is null then encode(gen_random_bytes(12), 'hex') else share_token end
+    where id = ${id}
+    returning *
+  `;
+  if (rows.length === 0) return null;
+  return rowToBoard(rows[0]);
 }

@@ -30,12 +30,18 @@ import {
   Sun,
   Moon,
   Home,
+  Hand,
+  Lock,
+  Clipboard,
+  Code2,
+  Flashlight,
+  Presentation,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
    Theme
 ----------------------------------------------------------------*/
-const LIGHT = {
+export const LIGHT = {
   appBg: "#F6F6F3",
   panelBg: "rgba(255,255,255,0.94)",
   panelBorder: "#E6E6E1",
@@ -102,6 +108,7 @@ const ROUGHNESS = [
 ];
 
 const TOOLS = [
+  { id: "hand", icon: Hand, label: "Hand", key: "h" },
   { id: "select", icon: MousePointer2, label: "Select", key: "1" },
   { id: "rectangle", icon: Square, label: "Rectangle", key: "2" },
   { id: "diamond", icon: Diamond, label: "Diamond", key: "3" },
@@ -111,6 +118,7 @@ const TOOLS = [
   { id: "freehand", icon: Pencil, label: "Draw", key: "7" },
   { id: "text", icon: Type, label: "Text", key: "8" },
   { id: "eraser", icon: Eraser, label: "Eraser", key: "9" },
+  { id: "laser", icon: Flashlight, label: "Laser", key: "k" },
 ];
 
 const FILL_TYPES = ["rectangle", "diamond", "ellipse"];
@@ -236,7 +244,7 @@ function smoothFreehandPath(points) {
   d += `L ${last[0].toFixed(2)} ${last[1].toFixed(2)}`;
   return d;
 }
-function getBBox(el) {
+export function getBBox(el) {
   if (el.type === "text") return { x: el.x, y: el.y, w: el.width || 40, h: el.height || 30 };
   if (BOX_TYPES.includes(el.type)) return { x: el.x, y: el.y, w: el.w || 40, h: el.h || 30 };
   if (el.type === "line" || el.type === "arrow" || el.type === "freehand") {
@@ -419,7 +427,7 @@ function ShapeLabel({ el, hidden }) {
     </text>
   );
 }
-function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick }) {
+export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick }) {
   const { type, seed, roughness } = el;
   if (type === "rectangle") {
     const pts = [[el.x, el.y], [el.x + el.w, el.y], [el.x + el.w, el.y + el.h], [el.x, el.y + el.h]];
@@ -544,6 +552,9 @@ export default function Whiteboard({ board, boardList }) {
   const [boardName, setBoardName] = useState(board.name);
   const [projectsPanelOpen, setProjectsPanelOpen] = useState(false);
   const [renamingId, setRenamingId] = useState(null);
+  const [isPublic, setIsPublic] = useState(board.isPublic || false);
+  const [shareToken, setShareToken] = useState(board.shareToken || null);
+  const [sharingBusy, setSharingBusy] = useState(false);
 
   const [elements, setElements] = useState(board.elements || []);
   const [canvasBg, setCanvasBg] = useState(board.canvasBg || CANVAS_BACKGROUNDS[0].value);
@@ -554,6 +565,8 @@ export default function Whiteboard({ board, boardList }) {
   const [zoom, setZoom] = useState(1);
   const [marquee, setMarquee] = useState(null);
   const [hoverBindTargetId, setHoverBindTargetId] = useState(null);
+  const [laserTrail, setLaserTrail] = useState([]);
+  const [presentationMode, setPresentationMode] = useState(false);
   const [cursorWorld, setCursorWorld] = useState({ x: 0, y: 0 });
   const [editingText, setEditingText] = useState(null);
   const [editingLabel, setEditingLabel] = useState(null);
@@ -723,6 +736,33 @@ export default function Whiteboard({ board, boardList }) {
       /* keep stale list */
     }
   }, []);
+
+  const toggleSharing = useCallback(async () => {
+    setSharingBusy(true);
+    try {
+      const res = await fetch(`/api/boards/${boardId}/share`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isPublic: !isPublic }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.board) throw new Error();
+      setIsPublic(data.board.isPublic);
+      setShareToken(data.board.shareToken);
+    } catch (e) {
+      setToast("Could not update sharing");
+    } finally {
+      setSharingBusy(false);
+    }
+  }, [boardId, isPublic]);
+
+  const copyShareLink = useCallback(() => {
+    const url = `${window.location.origin}/share/${shareToken}`;
+    navigator.clipboard.writeText(url).then(
+      () => setToast("Share link copied"),
+      () => setToast("Could not copy link")
+    );
+  }, [shareToken]);
 
   /* ---------- history ---------- */
   const beginChange = useCallback(() => { snapshotRef.current = JSON.parse(JSON.stringify(elementsRef.current)); }, []);
@@ -894,6 +934,10 @@ export default function Whiteboard({ board, boardList }) {
         setPan({ x: drag.panStartX + (e.clientX - drag.startClientX), y: drag.panStartY + (e.clientY - drag.startClientY) });
         return;
       }
+      if (drag.mode === "laser") {
+        setLaserTrail((prev) => [...prev, { x: e.clientX, y: e.clientY, t: Date.now() }]);
+        return;
+      }
       if (drag.mode === "shape-draw") {
         setElements((prev) =>
           prev.map((el) => {
@@ -959,7 +1003,9 @@ export default function Whiteboard({ board, boardList }) {
         const rect = { x: Math.min(drag.startX, x), y: Math.min(drag.startY, y), w: Math.abs(x - drag.startX), h: Math.abs(y - drag.startY) };
         setMarquee(rect);
         const hits = elementsRef.current.filter((el) => rectsIntersect(getBBox(el), rect)).map((el) => el.id);
-        setSelectedIds(hits);
+        const hitGroupIds = new Set(elementsRef.current.filter((el) => hits.includes(el.id) && el.groupId).map((el) => el.groupId));
+        const expanded = elementsRef.current.filter((el) => hits.includes(el.id) || (el.groupId && hitGroupIds.has(el.groupId))).map((el) => el.id);
+        setSelectedIds(expanded);
         return;
       }
       if (drag.mode === "erase") {
@@ -1064,13 +1110,14 @@ export default function Whiteboard({ board, boardList }) {
       if (interactingEmbedId) setInteractingEmbedId(null);
       if (projectsPanelOpen) setProjectsPanelOpen(false);
 
-      if (e.button === 1 || spaceHeldRef.current) {
+      if (e.button === 1 || spaceHeldRef.current || toolRef.current === "hand") {
         beginDrag({ mode: "pan", panStartX: panRef.current.x, panStartY: panRef.current.y, startClientX: e.clientX, startClientY: e.clientY });
         return;
       }
       const { x, y } = screenToWorld(e.clientX, e.clientY);
       const t = toolRef.current;
 
+      if (t === "laser") { beginDrag({ mode: "laser" }); return; }
       if (t === "select") {
         if (!e.shiftKey) setSelectedIds([]);
         beginDrag({ mode: "marquee", startX: x, startY: y });
@@ -1102,6 +1149,7 @@ export default function Whiteboard({ board, boardList }) {
 
   const handleShapePointerDown = useCallback(
     (e, el) => {
+      if (el.locked && toolRef.current === "select") return;
       if (toolRef.current !== "select") return;
       e.stopPropagation();
       if (editingText) finishTextEdit(true);
@@ -1115,11 +1163,13 @@ export default function Whiteboard({ board, boardList }) {
       }
       if (el.type === "embed" && e.detail === 2) { setInteractingEmbedId(el.id); return; }
 
+      const groupIds = el.groupId ? elementsRef.current.filter((e) => e.groupId === el.groupId).map((e) => e.id) : [el.id];
       let nextSelected = selectedIdsRef.current;
       if (e.shiftKey) {
-        nextSelected = nextSelected.includes(el.id) ? nextSelected.filter((id) => id !== el.id) : [...nextSelected, el.id];
+        const allSelected = groupIds.every((id) => nextSelected.includes(id));
+        nextSelected = allSelected ? nextSelected.filter((id) => !groupIds.includes(id)) : [...new Set([...nextSelected, ...groupIds])];
       } else if (!nextSelected.includes(el.id)) {
-        nextSelected = [el.id];
+        nextSelected = groupIds;
       }
       setSelectedIds(nextSelected);
 
@@ -1147,6 +1197,26 @@ export default function Whiteboard({ board, boardList }) {
     [beginChange, beginDrag]
   );
 
+  const zoomAtPoint = useCallback((screenX, screenY, nextZoomFn) => {
+    setZoom((z) => {
+      const nz = Math.min(4, Math.max(0.1, nextZoomFn(z)));
+      setPan((p) => ({
+        x: screenX - ((screenX - p.x) / z) * nz,
+        y: screenY - ((screenY - p.y) / z) * nz,
+      }));
+      return nz;
+    });
+  }, []);
+
+  /* ---------- laser trail fade ---------- */
+  useEffect(() => {
+    if (laserTrail.length === 0) return;
+    const id = setInterval(() => {
+      setLaserTrail((prev) => prev.filter((p) => Date.now() - p.t < 700));
+    }, 50);
+    return () => clearInterval(id);
+  }, [laserTrail.length]);
+
   /* ---------- wheel: pan / zoom ---------- */
   useEffect(() => {
     const node = containerRef.current;
@@ -1156,11 +1226,7 @@ export default function Whiteboard({ board, boardList }) {
       if (e.ctrlKey || e.metaKey) {
         const rect = svgRef.current.getBoundingClientRect();
         const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
-        setZoom((z) => {
-          const nz = Math.min(4, Math.max(0.1, z * (1 - e.deltaY * 0.002)));
-          setPan((p) => ({ x: cx - ((cx - p.x) / z) * nz, y: cy - ((cy - p.y) / z) * nz }));
-          return nz;
-        });
+        zoomAtPoint(cx, cy, (z) => z * (1 - e.deltaY * 0.002));
       } else if (e.shiftKey) {
         setPan((p) => ({ x: p.x - e.deltaY, y: p.y }));
       } else if (e.altKey) {
@@ -1171,7 +1237,7 @@ export default function Whiteboard({ board, boardList }) {
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
-  }, []);
+  }, [zoomAtPoint]);
 
   /* ---------- keyboard ---------- */
   useEffect(() => {
@@ -1187,10 +1253,41 @@ export default function Whiteboard({ board, boardList }) {
       if (meta && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); return; }
       if (meta && e.key.toLowerCase() === "d") { e.preventDefault(); duplicateSelected(); return; }
       if (meta && e.key.toLowerCase() === "a") { e.preventDefault(); setSelectedIds(elementsRef.current.map((el) => el.id)); return; }
+      if (meta && e.key.toLowerCase() === "g" && e.shiftKey) {
+        e.preventDefault();
+        if (selectedIdsRef.current.length > 0) {
+          beginChange();
+          setElements((prev) => prev.map((el) => (selectedIdsRef.current.includes(el.id) ? { ...el, groupId: undefined } : el)));
+          endChange();
+        }
+        return;
+      }
+      if (meta && e.key.toLowerCase() === "g") {
+        e.preventDefault();
+        if (selectedIdsRef.current.length > 1) {
+          const gid = genId();
+          beginChange();
+          setElements((prev) => prev.map((el) => (selectedIdsRef.current.includes(el.id) ? { ...el, groupId: gid } : el)));
+          endChange();
+        }
+        return;
+      }
+      if (meta && e.key.toLowerCase() === "l") {
+        e.preventDefault();
+        if (selectedIdsRef.current.length > 0) {
+          const selected = elementsRef.current.filter((el) => selectedIdsRef.current.includes(el.id));
+          const allLocked = selected.every((el) => el.locked);
+          beginChange();
+          setElements((prev) => prev.map((el) => (selectedIdsRef.current.includes(el.id) ? { ...el, locked: !allLocked } : el)));
+          endChange();
+          if (!allLocked) setSelectedIds([]); // deselect after locking, since locked elements shouldn't show active handles
+        }
+        return;
+      }
       if (meta && e.key.toLowerCase() === "s") { e.preventDefault(); saveNow(); return; }
       if (e.key === "Delete" || e.key === "Backspace") { deleteSelected(); return; }
       if (e.key === "Escape") {
-        setSelectedIds([]); setTool("select"); setLinkDraft(null); setEmbedDraft(null); setInteractingEmbedId(null); setProjectsPanelOpen(false);
+        setSelectedIds([]); setTool("select"); setLinkDraft(null); setEmbedDraft(null); setInteractingEmbedId(null); setProjectsPanelOpen(false); setPresentationMode(false);
         return;
       }
       const found = TOOLS.find((t) => t.key === e.key);
@@ -1203,7 +1300,7 @@ export default function Whiteboard({ board, boardList }) {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [undo, redo, duplicateSelected, deleteSelected, saveNow]);
+  }, [undo, redo, duplicateSelected, deleteSelected, saveNow, beginChange, endChange]);
 
   /* ---------- save-before-unload ---------- */
   useEffect(() => {
@@ -1294,58 +1391,105 @@ export default function Whiteboard({ board, boardList }) {
   );
 
   /* ---------- PNG export ---------- */
-  const exportPNG = useCallback(() => {
-    try {
-      const els = elementsRef.current;
-      if (els.length === 0) { setToast("Nothing to export yet"); return; }
-      const boxes = els.map(getBBox);
-      const minX = Math.min(...boxes.map((b) => b.x)) - 40, minY = Math.min(...boxes.map((b) => b.y)) - 40;
-      const maxX = Math.max(...boxes.map((b) => b.x + b.w)) + 40, maxY = Math.max(...boxes.map((b) => b.y + b.h)) + 40;
-      const w = Math.max(50, maxX - minX), h = Math.max(50, maxY - minY);
+  const buildBoardSvgString = useCallback(() => {
+    const els = elementsRef.current;
+    if (els.length === 0) throw new Error("Nothing to export yet");
+    const boxes = els.map(getBBox);
+    const minX = Math.min(...boxes.map((b) => b.x)) - 40, minY = Math.min(...boxes.map((b) => b.y)) - 40;
+    const maxX = Math.max(...boxes.map((b) => b.x + b.w)) + 40, maxY = Math.max(...boxes.map((b) => b.y + b.h)) + 40;
+    const w = Math.max(50, maxX - minX), h = Math.max(50, maxY - minY);
 
-      const svgNS = "http://www.w3.org/2000/svg";
-      const svg = document.createElementNS(svgNS, "svg");
-      svg.setAttribute("xmlns", svgNS);
-      svg.setAttribute("width", String(w));
-      svg.setAttribute("height", String(h));
-      svg.setAttribute("viewBox", `${minX} ${minY} ${w} ${h}`);
-      const bg = document.createElementNS(svgNS, "rect");
-      bg.setAttribute("x", String(minX)); bg.setAttribute("y", String(minY)); bg.setAttribute("width", String(w)); bg.setAttribute("height", String(h)); bg.setAttribute("fill", canvasBgRef.current);
-      svg.appendChild(bg);
+    const svgNS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("xmlns", svgNS);
+    svg.setAttribute("width", String(w));
+    svg.setAttribute("height", String(h));
+    svg.setAttribute("viewBox", `${minX} ${minY} ${w} ${h}`);
+    const bg = document.createElementNS(svgNS, "rect");
+    bg.setAttribute("x", String(minX)); bg.setAttribute("y", String(minY)); bg.setAttribute("width", String(w)); bg.setAttribute("height", String(h)); bg.setAttribute("fill", canvasBgRef.current);
+    svg.appendChild(bg);
 
-      const contentGroup = svgRef.current.querySelector("#content-layer");
-      if (contentGroup) {
-        const clone = contentGroup.cloneNode(true);
-        clone.querySelectorAll("iframe").forEach((f) => f.remove());
-        svg.appendChild(clone);
+    const contentGroup = svgRef.current.querySelector("#content-layer");
+    if (contentGroup) {
+      const clone = contentGroup.cloneNode(true);
+      clone.querySelectorAll("iframe").forEach((f) => f.remove());
+      svg.appendChild(clone);
+    }
+
+    return new XMLSerializer().serializeToString(svg);
+  }, []);
+
+  const buildBoardCanvas = useCallback(() => {
+    return new Promise<HTMLCanvasElement>((resolve, reject) => {
+      try {
+        const els = elementsRef.current;
+        if (els.length === 0) { reject(new Error("Nothing to export yet")); return; }
+        const boxes = els.map(getBBox);
+        const minX = Math.min(...boxes.map((b) => b.x)) - 40, minY = Math.min(...boxes.map((b) => b.y)) - 40;
+        const maxX = Math.max(...boxes.map((b) => b.x + b.w)) + 40, maxY = Math.max(...boxes.map((b) => b.y + b.h)) + 40;
+        const w = Math.max(50, maxX - minX), h = Math.max(50, maxY - minY);
+
+        const svgString = buildBoardSvgString();
+        const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+        const url = URL.createObjectURL(svgBlob);
+        const img = new Image();
+        img.onload = () => {
+          const scale = 2;
+          const canvas = document.createElement("canvas");
+          canvas.width = w * scale; canvas.height = h * scale;
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = canvasBgRef.current;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.scale(scale, scale);
+          ctx.drawImage(img, 0, 0, w, h);
+          URL.revokeObjectURL(url);
+          resolve(canvas);
+        };
+        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Export failed")); };
+        img.src = url;
+      } catch (err) {
+        reject(err);
       }
+    });
+  }, [buildBoardSvgString]);
 
-      const svgString = new XMLSerializer().serializeToString(svg);
-      const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
-      const url = URL.createObjectURL(svgBlob);
-      const img = new Image();
-      img.onload = () => {
-        const scale = 2;
-        const canvas = document.createElement("canvas");
-        canvas.width = w * scale; canvas.height = h * scale;
-        const ctx = canvas.getContext("2d");
-        ctx.fillStyle = canvasBgRef.current;
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.scale(scale, scale);
-        ctx.drawImage(img, 0, 0, w, h);
-        URL.revokeObjectURL(url);
-        try {
-          const dataUrl = canvas.toDataURL("image/png");
-          const a = document.createElement("a");
-          a.href = dataUrl; a.download = "board.png"; a.click();
-        } catch (err) { setToast("Export failed — try again"); }
-      };
-      img.onerror = () => setToast("Export failed — try again");
-      img.src = url;
+  const exportPNG = useCallback(async () => {
+    try {
+      const canvas = await buildBoardCanvas();
+      const dataUrl = canvas.toDataURL("image/png");
+      const a = document.createElement("a");
+      a.href = dataUrl; a.download = "board.png"; a.click();
     } catch (err) {
       setToast("Export failed — try again");
     }
-  }, []);
+  }, [buildBoardCanvas]);
+
+  const copyPNG = useCallback(async () => {
+    try {
+      const canvas = await buildBoardCanvas();
+      canvas.toBlob(async (blob) => {
+        if (!blob) { setToast("Couldn't copy — try downloading instead"); return; }
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+          setToast("Copied PNG to clipboard");
+        } catch (err) {
+          setToast("Couldn't copy — try downloading instead");
+        }
+      });
+    } catch (err) {
+      setToast("Nothing to copy yet");
+    }
+  }, [buildBoardCanvas]);
+
+  const copySVG = useCallback(async () => {
+    try {
+      const svgString = buildBoardSvgString();
+      await navigator.clipboard.writeText(svgString);
+      setToast("Copied SVG markup to clipboard");
+    } catch (err) {
+      setToast("Couldn't copy — try again");
+    }
+  }, [buildBoardSvgString]);
 
   /* ---------- derived ---------- */
   const selectedElements = useMemo(() => elements.filter((el) => selectedIds.includes(el.id)), [elements, selectedIds]);
@@ -1368,6 +1512,7 @@ export default function Whiteboard({ board, boardList }) {
 
   const handlePositions = useMemo(() => {
     if (!singleSelected) return [];
+    if (singleSelected.locked) return [];
     if (singleSelected.type === "text" || singleSelected.type === "link") return [];
     if (singleSelected.type === "line" || singleSelected.type === "arrow") {
       return singleSelected.points.map((p, i) => ({ key: `pt-${i}`, handle: i, wx: p.x, wy: p.y }));
@@ -1391,7 +1536,7 @@ export default function Whiteboard({ board, boardList }) {
     return { x, y, w: maxX - x, h: maxY - y };
   }, [selectedElements]);
 
-  const canvasCursor = spaceHeldRef.current ? "grab" : tool === "select" ? "default" : tool === "text" ? "text" : tool === "eraser" ? "cell" : tool === "link" || tool === "embed" ? "copy" : "crosshair";
+  const canvasCursor = spaceHeldRef.current || tool === "hand" ? "grab" : tool === "select" ? "default" : tool === "text" ? "text" : tool === "eraser" ? "cell" : tool === "link" || tool === "embed" ? "copy" : "crosshair";
 
   const sortedProjects = [...projects].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 
@@ -1455,7 +1600,17 @@ export default function Whiteboard({ board, boardList }) {
             <g pointerEvents="none">
               {selectedElements.map((el) => {
                 const b = getBBox(el);
-                return <rect key={el.id} x={b.x - 4} y={b.y - 4} width={b.w + 8} height={b.h + 8} fill="none" stroke="#4C5FF7" strokeWidth={1.5 / zoom} strokeDasharray={`${4 / zoom} ${3 / zoom}`} rx={4 / zoom} />;
+                return (
+                  <g key={el.id}>
+                    <rect x={b.x - 4} y={b.y - 4} width={b.w + 8} height={b.h + 8} fill="none" stroke="#4C5FF7" strokeWidth={1.5 / zoom} strokeDasharray={`${4 / zoom} ${3 / zoom}`} rx={4 / zoom} />
+                    {el.locked && (
+                      <svg x={b.x - 4} y={b.y - 4} width={16 / zoom} height={16 / zoom} viewBox="0 0 24 24" style={{ overflow: "visible" }}>
+                        <rect x={-2} y={-2} width={20} height={20} rx={4} fill="#4C5FF7" />
+                        <Lock x={2} y={2} size={12} color="white" strokeWidth={2.5} />
+                      </svg>
+                    )}
+                  </g>
+                );
               })}
               {multiBBox && <rect x={multiBBox.x - 8} y={multiBBox.y - 8} width={multiBBox.w + 16} height={multiBBox.h + 16} fill="none" stroke="#4C5FF7" strokeWidth={1 / zoom} rx={6 / zoom} />}
             </g>
@@ -1577,6 +1732,7 @@ export default function Whiteboard({ board, boardList }) {
       <input ref={imageInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleImageFileChosen} />
       <input ref={jsonInputRef} type="file" accept="application/json,.json" style={{ display: "none" }} onChange={handleJSONFileChosen} />
 
+      {!presentationMode && (
       <div style={{ position: "absolute", top: 20, left: "50%", transform: "translateX(-50%)", display: "flex", gap: 2, padding: 5, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 16, boxShadow: theme.shadow }}>
         {TOOLS.map((t) => {
           const Icon = t.icon;
@@ -1587,7 +1743,9 @@ export default function Whiteboard({ board, boardList }) {
         <button className={`tb-btn${tool === "link" ? " active" : ""}`} title="Link to another board" onClick={() => setTool("link")}><Link2 size={18} /></button>
         <button className={`tb-btn${tool === "embed" ? " active" : ""}`} title="Embed a web page" onClick={() => setTool("embed")}><Globe size={18} /></button>
       </div>
+      )}
 
+      {!presentationMode && (
       <div style={{ position: "absolute", top: 20, left: 20, display: "flex", gap: 8, alignItems: "flex-start" }}>
         <button onClick={() => router.push("/")} title="All boards" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 38, height: 38, flexShrink: 0, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 12, boxShadow: theme.shadow, cursor: "pointer" }}>
           <Home size={16} color={theme.muted} />
@@ -1628,16 +1786,33 @@ export default function Whiteboard({ board, boardList }) {
                   ))}
                 </div>
                 <div className="panel-label">Theme</div>
-                <div style={{ display: "flex", gap: 4 }}>
+                <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
                   <button className={`seg-btn${!isDark ? " on" : ""}`} onClick={() => setTheme(false)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}><Sun size={13} /> Light</button>
                   <button className={`seg-btn${isDark ? " on" : ""}`} onClick={() => setTheme(true)} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}><Moon size={13} /> Dark</button>
                 </div>
+                <div className="panel-label">Share</div>
+                <button className="seg-btn" style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }} disabled={sharingBusy} onClick={toggleSharing}>
+                  {isPublic ? "Make private" : "Make public"}
+                </button>
+                {isPublic && shareToken && (
+                  <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+                    <input
+                      readOnly
+                      value={typeof window !== "undefined" ? `${window.location.origin}/share/${shareToken}` : ""}
+                      onFocus={(e) => e.target.select()}
+                      style={{ flex: 1, minWidth: 0, padding: "6px 8px", borderRadius: 8, border: `1px solid ${theme.panelBorder}`, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", background: isDark ? "#242427" : "white", color: theme.ink }}
+                    />
+                    <button className="icon-btn-sm" style={{ width: 28, height: 28, border: `1px solid ${theme.panelBorder}`, borderRadius: 8 }} title="Copy link" onClick={copyShareLink}><Clipboard size={13} /></button>
+                  </div>
+                )}
               </div>
             </div>
           )}
         </div>
       </div>
+      )}
 
+      {!presentationMode && (
       <div style={{ position: "absolute", top: 20, right: 20, display: "flex", gap: 2, padding: 5, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 16, boxShadow: theme.shadow }}>
         <button className="tb-btn" title="Undo (Ctrl+Z)" onClick={undo} disabled={past.length === 0}><Undo2 size={18} /></button>
         <button className="tb-btn" title="Redo (Ctrl+Shift+Z)" onClick={redo} disabled={future.length === 0}><Redo2 size={18} /></button>
@@ -1646,11 +1821,15 @@ export default function Whiteboard({ board, boardList }) {
         <button className="tb-btn" title="Save as… (.json)" onClick={exportJSON}><Save size={18} /></button>
         <button className="tb-btn" title="Import a board (.json)" onClick={() => jsonInputRef.current?.click()}><Upload size={18} /></button>
         <button className="tb-btn" title="Export PNG" onClick={exportPNG}><Download size={18} /></button>
+        <button className="tb-btn" title="Copy PNG to clipboard" onClick={copyPNG}><Clipboard size={18} /></button>
+        <button className="tb-btn" title="Copy SVG markup" onClick={copySVG}><Code2 size={18} /></button>
         <div style={{ width: 1, background: theme.panelBorder, margin: "4px 3px" }} />
         <button className="tb-btn" title="Clear board" onClick={clearCanvas}><Trash2 size={18} /></button>
+        <button className={`tb-btn${presentationMode ? " active" : ""}`} title="Presentation mode" onClick={() => setPresentationMode((v) => !v)}><Presentation size={18} /></button>
       </div>
+      )}
 
-      {showPanel && (
+      {!presentationMode && showPanel && (
         <div style={{ position: "absolute", top: 78, left: 20, width: 168, padding: 14, display: "flex", flexDirection: "column", gap: 14, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 16, boxShadow: theme.shadow }}>
           {!STROKELESS_TYPES.includes(effectiveType) && (
             <div>
@@ -1734,11 +1913,22 @@ export default function Whiteboard({ board, boardList }) {
         </div>
       )}
 
+      {!presentationMode && (
       <div style={{ position: "absolute", bottom: 20, left: 20, display: "flex", alignItems: "center", gap: 2, padding: 5, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 14, boxShadow: theme.shadow }}>
-        <button className="tb-btn" style={{ width: 30, height: 30 }} onClick={() => setZoom((z) => Math.max(0.1, z - 0.1))}><ZoomOut size={16} /></button>
-        <button onClick={() => setZoom(1)} style={{ width: 52, textAlign: "center", fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: theme.muted, background: "none", border: "none", cursor: "pointer" }} title="Reset zoom">{Math.round(zoom * 100)}%</button>
-        <button className="tb-btn" style={{ width: 30, height: 30 }} onClick={() => setZoom((z) => Math.min(4, z + 0.1))}><ZoomIn size={16} /></button>
+        <button className="tb-btn" style={{ width: 30, height: 30 }} onClick={() => {
+          const rect = containerRef.current.getBoundingClientRect();
+          zoomAtPoint(rect.width / 2, rect.height / 2, (z) => z - 0.1);
+        }}><ZoomOut size={16} /></button>
+        <button onClick={() => {
+          const rect = containerRef.current.getBoundingClientRect();
+          zoomAtPoint(rect.width / 2, rect.height / 2, () => 1);
+        }} style={{ width: 52, textAlign: "center", fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: theme.muted, background: "none", border: "none", cursor: "pointer" }} title="Reset zoom">{Math.round(zoom * 100)}%</button>
+        <button className="tb-btn" style={{ width: 30, height: 30 }} onClick={() => {
+          const rect = containerRef.current.getBoundingClientRect();
+          zoomAtPoint(rect.width / 2, rect.height / 2, (z) => z + 0.1);
+        }}><ZoomIn size={16} /></button>
       </div>
+      )}
 
       <div style={{ position: "absolute", bottom: 24, right: 24, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, pointerEvents: "none" }}>
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: theme.hud, letterSpacing: "0.02em" }}>
@@ -1746,6 +1936,12 @@ export default function Whiteboard({ board, boardList }) {
         </div>
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: saveStatus === "error" ? "#E5484D" : theme.hud }}>{saveLabel}</div>
       </div>
+
+      {laserTrail.map((p, i) => {
+        const age = Date.now() - p.t;
+        const opacity = Math.max(0, 1 - age / 700);
+        return <div key={i} style={{ position: "absolute", left: p.x - 5, top: p.y - 5, width: 10, height: 10, borderRadius: "50%", background: "#E5484D", opacity, pointerEvents: "none", boxShadow: `0 0 ${8 * opacity}px rgba(229,72,77,${opacity})` }} />;
+      })}
 
       {toast && (
         <div style={{ position: "absolute", bottom: 70, left: "50%", transform: "translateX(-50%)", background: theme.ink, color: theme.appBg, padding: "8px 16px", borderRadius: 10, fontSize: 13, zIndex: 40 }}>{toast}</div>
