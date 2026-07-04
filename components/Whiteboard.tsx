@@ -36,6 +36,8 @@ import {
   Code2,
   Flashlight,
   Presentation,
+  Check,
+  X,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -552,6 +554,7 @@ export default function Whiteboard({ board, boardList }) {
   const [boardName, setBoardName] = useState(board.name);
   const [projectsPanelOpen, setProjectsPanelOpen] = useState(false);
   const [renamingId, setRenamingId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [isPublic, setIsPublic] = useState(board.isPublic || false);
   const [shareToken, setShareToken] = useState(board.shareToken || null);
   const [sharingBusy, setSharingBusy] = useState(false);
@@ -766,7 +769,17 @@ export default function Whiteboard({ board, boardList }) {
   }, [shareToken, shareLinkMode]);
 
   /* ---------- history ---------- */
-  const beginChange = useCallback(() => { snapshotRef.current = JSON.parse(JSON.stringify(elementsRef.current || [])); }, []);
+  const beginChange = useCallback(() => {
+    if (snapshotRef.current !== null) {
+      console.warn("beginChange called while a previous change was still open — flushing it to avoid losing history");
+      setPast((p) => [...p.slice(-49), snapshotRef.current]);
+      setFuture([]);
+    }
+    setElements((current) => {
+      snapshotRef.current = JSON.parse(JSON.stringify(current));
+      return current; // no structural change — just reading the true current value synchronously
+    });
+  }, []);
   const endChange = useCallback(() => {
     if (snapshotRef.current !== null) {
       setPast((p) => [...p.slice(-49), snapshotRef.current]);
@@ -1754,7 +1767,7 @@ export default function Whiteboard({ board, boardList }) {
           <Home size={16} color={theme.muted} />
         </button>
         <div>
-          <button onClick={(e) => { e.stopPropagation(); refreshProjects(); setProjectsPanelOpen((v) => !v); }}
+          <button onClick={(e) => { e.stopPropagation(); refreshProjects(); setConfirmDeleteId(null); setProjectsPanelOpen((v) => !v); }}
             style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 12, boxShadow: theme.shadow, cursor: "pointer", fontFamily: "inherit" }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: theme.ink, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{boardName}</span>
             <ChevronDown size={14} color={theme.muted} />
@@ -1768,7 +1781,7 @@ export default function Whiteboard({ board, boardList }) {
               </div>
               <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 10 }}>
                 {sortedProjects.map((p) => (
-                  <div key={p.id} className={`proj-row${p.id === boardId ? " active" : ""}`} onClick={() => { if (renamingId !== p.id) goToBoard(p.id); }}>
+                  <div key={p.id} className={`proj-row${p.id === boardId ? " active" : ""}`} onClick={() => { setConfirmDeleteId(null); if (renamingId !== p.id) goToBoard(p.id); }}>
                     {renamingId === p.id ? (
                       <input className="proj-name-input" autoFocus defaultValue={p.name} onClick={(e) => e.stopPropagation()}
                         onBlur={(e) => { renameProject(p.id, e.target.value.trim()); setRenamingId(null); }}
@@ -1776,8 +1789,18 @@ export default function Whiteboard({ board, boardList }) {
                     ) : (
                       <span style={{ fontSize: 13, color: theme.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
                     )}
-                    <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setRenamingId(p.id); }} title="Rename"><PencilIcon size={12} /></button>
-                    <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); deleteProject(p.id); }} title="Delete"><Trash2 size={12} /></button>
+                    {confirmDeleteId === p.id ? (
+                      <>
+                        <span style={{ fontSize: 11, color: "#E5484D", fontWeight: 600, marginRight: 2 }}>Delete?</span>
+                        <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); deleteProject(p.id); }} title="Confirm delete" style={{ color: "#E5484D" }}><Check size={14} /></button>
+                        <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); }} title="Cancel"><X size={14} /></button>
+                      </>
+                    ) : (
+                      <>
+                        <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setRenamingId(p.id); }} title="Rename"><PencilIcon size={12} /></button>
+                        <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(p.id); }} title="Delete"><Trash2 size={12} /></button>
+                      </>
+                    )}
                   </div>
                 ))}
               </div>

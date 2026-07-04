@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, Trash2, Pencil, AlertTriangle } from "lucide-react";
+import { Plus, Trash2, Pencil, AlertTriangle, Check, X } from "lucide-react";
 
 const LIGHT = { appBg: "#F6F6F3", panelBg: "#FFFFFF", panelBorder: "#E6E6E1", ink: "#232326", muted: "#9A9AA2", hover: "#F0F0EE" };
 const DARK = { appBg: "#1B1B1D", panelBg: "#202023", panelBorder: "#3A3A3E", ink: "#EDEDEC", muted: "#8F8F96", hover: "#2B2B2F" };
@@ -24,6 +24,7 @@ export default function Dashboard({ initialBoards, dbError }: { initialBoards: a
   const [boards, setBoards] = useState(initialBoards);
   const [isDark, setIsDark] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const theme = isDark ? DARK : LIGHT;
 
@@ -89,7 +90,7 @@ export default function Dashboard({ initialBoards, dbError }: { initialBoards: a
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: theme.appBg, fontFamily: "'Inter', -apple-system, sans-serif" }}>
+    <div style={{ minHeight: "100vh", background: theme.appBg, fontFamily: "'Inter', -apple-system, sans-serif" }} onClick={() => setConfirmDeleteId(null)}>
       <div style={{ maxWidth: 880, margin: "0 auto", padding: "56px 24px" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
           <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: "0.14em", textTransform: "uppercase", color: theme.muted }}>
@@ -141,7 +142,10 @@ export default function Dashboard({ initialBoards, dbError }: { initialBoards: a
             <div
               key={b.id}
               style={{ background: theme.panelBg, border: `1px solid ${theme.panelBorder}`, borderRadius: 14, padding: 16, cursor: "pointer" }}
-              onClick={() => renamingId !== b.id && router.push(`/board/${b.id}`)}
+              onClick={() => {
+                setConfirmDeleteId(null);
+                if (renamingId !== b.id) router.push(`/board/${b.id}`);
+              }}
             >
               <div style={{ height: 64, borderRadius: 8, background: theme.hover, marginBottom: 12 }} />
               {renamingId === b.id ? (
@@ -162,18 +166,40 @@ export default function Dashboard({ initialBoards, dbError }: { initialBoards: a
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <span style={{ fontSize: 11, color: theme.muted, fontFamily: "'JetBrains Mono', monospace" }}>{timeAgo(b.updatedAt)}</span>
                 <div style={{ display: "flex", gap: 4 }}>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setRenamingId(b.id); }}
-                    style={{ width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "transparent", borderRadius: 6, cursor: "pointer", color: theme.muted }}
-                  >
-                    <Pencil size={12} />
-                  </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); deleteBoard(b.id); }}
-                    style={{ width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "transparent", borderRadius: 6, cursor: "pointer", color: theme.muted }}
-                  >
-                    <Trash2 size={12} />
-                  </button>
+                  {confirmDeleteId === b.id ? (
+                    <>
+                      <span style={{ fontSize: 11, color: "#E5484D", fontWeight: 600, marginRight: 2 }}>Delete?</span>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); deleteBoard(b.id); }}
+                        title="Confirm delete"
+                        style={{ width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "transparent", borderRadius: 6, cursor: "pointer", color: "#E5484D" }}
+                      >
+                        <Check size={14} />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); }}
+                        title="Cancel"
+                        style={{ width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "transparent", borderRadius: 6, cursor: "pointer", color: theme.muted }}
+                      >
+                        <X size={14} />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setRenamingId(b.id); }}
+                        style={{ width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "transparent", borderRadius: 6, cursor: "pointer", color: theme.muted }}
+                      >
+                        <Pencil size={12} />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(b.id); }}
+                        style={{ width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "transparent", borderRadius: 6, cursor: "pointer", color: theme.muted }}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
