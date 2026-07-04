@@ -619,6 +619,7 @@ export default function Whiteboard({ board, boardList }) {
   const [projectsPanelOpen, setProjectsPanelOpen] = useState(false);
   const [renamingId, setRenamingId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [creatingBoard, setCreatingBoard] = useState(false);
   const [isPublic, setIsPublic] = useState(board.isPublic || false);
   const [shareToken, setShareToken] = useState(board.shareToken || null);
   const [sharingBusy, setSharingBusy] = useState(false);
@@ -742,9 +743,12 @@ export default function Whiteboard({ board, boardList }) {
 
   const addProject = useCallback(
     async (name = "") => {
-      clearTimeout(saveTimerRef.current);
-      await saveNow();
+      console.log("[addProject] called from", new Error().stack);
+      if (creatingBoard) return null;
+      setCreatingBoard(true);
       try {
+        clearTimeout(saveTimerRef.current);
+        await saveNow();
         const res = await fetch("/api/boards", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -757,10 +761,12 @@ export default function Whiteboard({ board, boardList }) {
         }
       } catch (e) {
         setToast("Could not create a new board");
+      } finally {
+        setCreatingBoard(false);
       }
       return null;
     },
-    [router, saveNow]
+    [router, saveNow, creatingBoard]
   );
 
   const renameProject = useCallback(
@@ -1850,7 +1856,7 @@ export default function Whiteboard({ board, boardList }) {
             <div onPointerDown={(e) => e.stopPropagation()} style={{ position: "relative", marginTop: 6, width: 260, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 14, boxShadow: theme.shadow, padding: 10, zIndex: 30 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
                 <div className="panel-label" style={{ margin: 0 }}>Boards</div>
-                <button className="icon-btn-sm" onClick={() => addProject()}><Plus size={14} /></button>
+                <button className="icon-btn-sm" onClick={() => addProject()} disabled={creatingBoard}><Plus size={14} /></button>
               </div>
               <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 10 }}>
                 {sortedProjects.map((p) => (

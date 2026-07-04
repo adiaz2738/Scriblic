@@ -14,6 +14,7 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
+    console.log("[create-board]", new Date().toISOString(), "name:", body.name);
     const board = await createBoard(body.name);
     return NextResponse.json({ board });
   } catch (err: any) {

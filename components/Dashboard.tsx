@@ -44,6 +44,7 @@ export default function Dashboard({ initialBoards, dbError }: { initialBoards: a
   }
 
   async function createBoard() {
+    console.log("[addProject] called from", new Error().stack);
     setBusy(true);
     try {
       const res = await fetch("/api/boards", {
