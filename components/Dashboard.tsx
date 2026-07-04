@@ -7,6 +7,11 @@ import { Plus, Trash2, Pencil, AlertTriangle, Check, X } from "lucide-react";
 const LIGHT = { appBg: "#F6F6F3", panelBg: "#FFFFFF", panelBorder: "#E6E6E1", ink: "#232326", muted: "#9A9AA2", hover: "#F0F0EE" };
 const DARK = { appBg: "#1B1B1D", panelBg: "#202023", panelBorder: "#3A3A3E", ink: "#EDEDEC", muted: "#8F8F96", hover: "#2B2B2F" };
 
+// Must match the "Slate" entry in CANVAS_BACKGROUNDS in Whiteboard.tsx — new
+// boards created while in dark mode get this instead of the server's default
+// white, so they don't flash white before the user ever sees them.
+const DARK_CANVAS_BG = "#20232B";
+
 function timeAgo(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(diff / 60000);
@@ -58,6 +63,13 @@ export default function Dashboard({ initialBoards, dbError }: { initialBoards: a
       if (!res.ok || !data.board) {
         setCreateBoardError(data.error || "Something went wrong creating the board.");
         return;
+      }
+      if (isDark) {
+        await fetch(`/api/boards/${data.board.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ canvasBg: DARK_CANVAS_BG }),
+        }).catch(() => {});
       }
       router.push(`/board/${data.board.id}`);
     } catch (e) {

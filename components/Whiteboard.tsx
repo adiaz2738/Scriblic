@@ -762,6 +762,17 @@ export default function Whiteboard({ board, boardList }) {
           setCreateBoardError(data.error || "Something went wrong creating the board.");
           return null;
         }
+        if (isDark) {
+          // New boards default to a white (Paper) canvas server-side, since the
+          // server has no concept of the client's theme preference. Fix it up
+          // immediately so the board never flashes white before loading dark.
+          const slateBg = CANVAS_BACKGROUNDS.find((c) => c.name === "Slate").value;
+          await fetch(`/api/boards/${data.board.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ canvasBg: slateBg }),
+          }).catch(() => {});
+        }
         router.push(`/board/${data.board.id}`);
         return data.board;
       } catch (e) {
@@ -771,7 +782,7 @@ export default function Whiteboard({ board, boardList }) {
       }
       return null;
     },
-    [router, saveNow, creatingBoard]
+    [router, saveNow, creatingBoard, isDark]
   );
 
   const renameProject = useCallback(
