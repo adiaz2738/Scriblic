@@ -38,6 +38,9 @@ import {
   Presentation,
   Check,
   X,
+  ChevronsDown,
+  ChevronUp,
+  ChevronsUp,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -312,7 +315,21 @@ function ellipseBoundaryPoint(bbox, fromX, fromY) {
   const scale = denom === 0 ? 0 : 1 / denom;
   return { x: cx + dx * scale, y: cy + dy * scale };
 }
-function getBindPoint(el, fromX, fromY, gap = 6) {
+const BIND_FOCUS_SNAP_THRESHOLD = 0.08;
+// `focus` (-1..1) records where along the attached edge a bound endpoint
+// landed, so it can be re-derived from the shape's current bbox as it
+// moves/resizes instead of sliding to a new angle-derived point each time.
+function computeBindFocus(bbox, boundaryPt) {
+  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
+  const dx = boundaryPt.x - cx, dy = boundaryPt.y - cy;
+  const nx = Math.abs(dx) / (bbox.w / 2 || 1e-6);
+  const ny = Math.abs(dy) / (bbox.h / 2 || 1e-6);
+  let focus = nx >= ny ? dy / (bbox.h / 2 || 1e-6) : dx / (bbox.w / 2 || 1e-6);
+  focus = Math.max(-1, Math.min(1, focus));
+  if (Math.abs(focus) < BIND_FOCUS_SNAP_THRESHOLD) focus = 0;
+  return focus;
+}
+function getBindPointWithFocus(el, fromX, fromY, gap = 6) {
   const bbox = getBBox(el);
   const pt =
     el.type === "diamond" ? diamondBoundaryPoint(bbox, fromX, fromY) :
@@ -321,7 +338,31 @@ function getBindPoint(el, fromX, fromY, gap = 6) {
   const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
   const dx = pt.x - cx, dy = pt.y - cy;
   const len = Math.hypot(dx, dy) || 1;
-  return { x: pt.x + (dx / len) * gap, y: pt.y + (dy / len) * gap };
+  const focus = computeBindFocus(bbox, pt);
+  return { point: { x: pt.x + (dx / len) * gap, y: pt.y + (dy / len) * gap }, focus };
+}
+// Re-derives a bound endpoint straight from the shape's current bbox and
+// the stored `focus`, so it stays locked to the same relative position on
+// the same edge rather than being re-derived from the current angle.
+function getFocusedBindPoint(el, focus, otherX, otherY, gap = 6) {
+  const bbox = getBBox(el);
+  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
+  const dx = otherX - cx, dy = otherY - cy;
+  const nx = Math.abs(dx) / (bbox.w / 2 || 1e-6);
+  const ny = Math.abs(dy) / (bbox.h / 2 || 1e-6);
+  let x, y, gx, gy;
+  if (nx >= ny) {
+    const side = dx >= 0 ? 1 : -1;
+    x = cx + side * (bbox.w / 2);
+    y = cy + focus * (bbox.h / 2);
+    gx = side; gy = 0;
+  } else {
+    const side = dy >= 0 ? 1 : -1;
+    x = cx + focus * (bbox.w / 2);
+    y = cy + side * (bbox.h / 2);
+    gx = 0; gy = side;
+  }
+  return { x: x + gx * gap, y: y + gy * gap };
 }
 const BINDABLE_TYPES = ["rectangle", "diamond", "ellipse", "image", "embed", "link"];
 function findBindTarget(elements, x, y, excludeId) {
@@ -348,18 +389,41 @@ function updateBoundArrows(elements, updatedIds) {
       const target = byId.get(el.startBinding.elementId);
       if (target) {
         const other = el.endBinding ? centerOf(byId.get(el.endBinding.elementId) || target) : p1;
-        p0 = getBindPoint(target, other.x, other.y);
+        p0 = getFocusedBindPoint(target, el.startBinding.focus || 0, other.x, other.y);
       }
     }
     if (endBoundUpdated) {
       const target = byId.get(el.endBinding.elementId);
       if (target) {
         const other = el.startBinding ? centerOf(byId.get(el.startBinding.elementId) || target) : p0;
-        p1 = getBindPoint(target, other.x, other.y);
+        p1 = getFocusedBindPoint(target, el.endBinding.focus || 0, other.x, other.y);
       }
     }
     return { ...el, points: [p0, p1] };
   });
+}
+function reorderElements(elements, selectedIds, direction) {
+  const selectedSet = new Set(selectedIds);
+  if (direction === "front" || direction === "back") {
+    const selected = elements.filter((el) => selectedSet.has(el.id));
+    const rest = elements.filter((el) => !selectedSet.has(el.id));
+    return direction === "front" ? [...rest, ...selected] : [...selected, ...rest];
+  }
+  const arr = [...elements];
+  if (direction === "forward") {
+    for (let i = arr.length - 2; i >= 0; i--) {
+      if (selectedSet.has(arr[i].id) && !selectedSet.has(arr[i + 1].id)) {
+        [arr[i], arr[i + 1]] = [arr[i + 1], arr[i]];
+      }
+    }
+  } else {
+    for (let i = 1; i < arr.length; i++) {
+      if (selectedSet.has(arr[i].id) && !selectedSet.has(arr[i - 1].id)) {
+        [arr[i], arr[i - 1]] = [arr[i - 1], arr[i]];
+      }
+    }
+  }
+  return arr;
 }
 function measureText(text, fontSize) {
   const lines = text.split("\n");
@@ -429,7 +493,7 @@ function ShapeLabel({ el, hidden }) {
     </text>
   );
 }
-export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick }) {
+export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick, isSelected = false }) {
   const { type, seed, roughness } = el;
   if (type === "rectangle") {
     const pts = [[el.x, el.y], [el.x + el.w, el.y], [el.x + el.w, el.y + el.h], [el.x, el.y + el.h]];
@@ -437,7 +501,7 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent") e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent" && !isSelected) e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         {el.fill !== "transparent" && (
           radius > 0
             ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
@@ -454,7 +518,7 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent") e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent" && !isSelected) e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         {el.fill !== "transparent" && (
           radius > 0
             ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
@@ -471,7 +535,7 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent") e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent" && !isSelected) e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         {el.fill !== "transparent" && <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill={el.fill} stroke="none" />}
         <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
         <ShapeLabel el={el} hidden={hideLabel} />
@@ -853,6 +917,13 @@ export default function Whiteboard({ board, boardList }) {
     endChange();
   }, [beginChange, endChange]);
 
+  const reorderSelected = useCallback((direction) => {
+    if (selectedIdsRef.current.length === 0) return;
+    beginChange();
+    setElements((prev) => reorderElements(prev, selectedIdsRef.current, direction));
+    endChange();
+  }, [beginChange, endChange]);
+
   const duplicateSelected = useCallback(() => {
     if (selectedIdsRef.current.length === 0) return;
     beginChange();
@@ -1050,13 +1121,15 @@ export default function Whiteboard({ board, boardList }) {
                 let startBinding = null, endBinding = null;
                 const startTarget = findBindTarget(prev, p0.x, p0.y, e.id);
                 if (startTarget) {
-                  startBinding = { elementId: startTarget.id };
-                  p0 = getBindPoint(startTarget, p1.x, p1.y);
+                  const bound = getBindPointWithFocus(startTarget, p1.x, p1.y);
+                  startBinding = { elementId: startTarget.id, focus: bound.focus };
+                  p0 = bound.point;
                 }
                 const endTarget = findBindTarget(prev, p1.x, p1.y, e.id);
                 if (endTarget) {
-                  endBinding = { elementId: endTarget.id };
-                  p1 = getBindPoint(endTarget, p0.x, p0.y);
+                  const bound = getBindPointWithFocus(endTarget, p0.x, p0.y);
+                  endBinding = { elementId: endTarget.id, focus: bound.focus };
+                  p1 = bound.point;
                 }
                 return { ...e, points: [p0, p1], startBinding, endBinding };
               })
@@ -1089,10 +1162,10 @@ export default function Whiteboard({ board, boardList }) {
               prev.map((e) => {
                 if (e.id !== el.id) return e;
                 if (!target) return { ...e, [bindKey]: null };
-                const snapped = getBindPoint(target, otherPoint.x, otherPoint.y);
+                const bound = getBindPointWithFocus(target, otherPoint.x, otherPoint.y);
                 const pts = [...e.points];
-                pts[drag.handle] = snapped;
-                return { ...e, points: pts, [bindKey]: { elementId: target.id } };
+                pts[drag.handle] = bound.point;
+                return { ...e, points: pts, [bindKey]: { elementId: target.id, focus: bound.focus } };
               })
             );
           }
@@ -1604,7 +1677,7 @@ export default function Whiteboard({ board, boardList }) {
           {(elements || []).map((el) =>
             editingText && editingText.id === el.id ? null : (
               <g key={el.id} opacity={el.opacity} onPointerDown={(e) => handleShapePointerDown(e, el)} style={{ cursor: tool === "select" ? "move" : "inherit" }}>
-                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} onLabelDoubleClick={(target) => { if (toolRef.current === "select") startLabelEdit(target); }} />
+                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} onLabelDoubleClick={(target) => { if (toolRef.current === "select") startLabelEdit(target); }} isSelected={selectedIds.includes(el.id)} />
               </g>
             )
           )}
@@ -1863,6 +1936,18 @@ export default function Whiteboard({ board, boardList }) {
 
       {!presentationMode && showPanel && (
         <div style={{ position: "absolute", top: 78, left: 20, width: 168, padding: 14, display: "flex", flexDirection: "column", gap: 14, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 16, boxShadow: theme.shadow }}>
+          {selectedIds.length > 0 && (
+            <div>
+              <div className="panel-label">Layers</div>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button className="seg-btn" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }} title="Send to back" onClick={() => reorderSelected("back")}><ChevronsDown size={14} /></button>
+                <button className="seg-btn" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }} title="Send backward" onClick={() => reorderSelected("backward")}><ChevronDown size={14} /></button>
+                <button className="seg-btn" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }} title="Bring forward" onClick={() => reorderSelected("forward")}><ChevronUp size={14} /></button>
+                <button className="seg-btn" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }} title="Bring to front" onClick={() => reorderSelected("front")}><ChevronsUp size={14} /></button>
+              </div>
+            </div>
+          )}
+
           {!STROKELESS_TYPES.includes(effectiveType) && (
             <div>
               <div className="panel-label">Stroke</div>
