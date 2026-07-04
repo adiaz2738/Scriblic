@@ -555,6 +555,7 @@ export default function Whiteboard({ board, boardList }) {
   const [isPublic, setIsPublic] = useState(board.isPublic || false);
   const [shareToken, setShareToken] = useState(board.shareToken || null);
   const [sharingBusy, setSharingBusy] = useState(false);
+  const [shareLinkMode, setShareLinkMode] = useState("static");
 
   const [elements, setElements] = useState(board.elements || []);
   const [canvasBg, setCanvasBg] = useState(board.canvasBg || CANVAS_BACKGROUNDS[0].value);
@@ -757,15 +758,15 @@ export default function Whiteboard({ board, boardList }) {
   }, [boardId, isPublic]);
 
   const copyShareLink = useCallback(() => {
-    const url = `${window.location.origin}/share/${shareToken}`;
+    const url = `${window.location.origin}/share/${shareToken}${shareLinkMode === "dynamic" ? "?mode=dynamic" : ""}`;
     navigator.clipboard.writeText(url).then(
       () => setToast("Share link copied"),
       () => setToast("Could not copy link")
     );
-  }, [shareToken]);
+  }, [shareToken, shareLinkMode]);
 
   /* ---------- history ---------- */
-  const beginChange = useCallback(() => { snapshotRef.current = JSON.parse(JSON.stringify(elementsRef.current)); }, []);
+  const beginChange = useCallback(() => { snapshotRef.current = JSON.parse(JSON.stringify(elementsRef.current || [])); }, []);
   const endChange = useCallback(() => {
     if (snapshotRef.current !== null) {
       setPast((p) => [...p.slice(-49), snapshotRef.current]);
@@ -776,8 +777,9 @@ export default function Whiteboard({ board, boardList }) {
   const undo = useCallback(() => {
     setPast((p) => {
       if (p.length === 0) return p;
-      const prev = p[p.length - 1];
-      setFuture((f) => [elementsRef.current, ...f]);
+      const prev = p[p.length - 1] || [];
+      const current = elementsRef.current || [];
+      setFuture((f) => [current, ...f]);
       setElements(prev);
       setSelectedIds([]);
       return p.slice(0, -1);
@@ -786,8 +788,9 @@ export default function Whiteboard({ board, boardList }) {
   const redo = useCallback(() => {
     setFuture((f) => {
       if (f.length === 0) return f;
-      const next = f[0];
-      setPast((p) => [...p, elementsRef.current]);
+      const next = f[0] || [];
+      const current = elementsRef.current || [];
+      setPast((p) => [...p, current]);
       setElements(next);
       setSelectedIds([]);
       return f.slice(1);
@@ -1492,7 +1495,7 @@ export default function Whiteboard({ board, boardList }) {
   }, [buildBoardSvgString]);
 
   /* ---------- derived ---------- */
-  const selectedElements = useMemo(() => elements.filter((el) => selectedIds.includes(el.id)), [elements, selectedIds]);
+  const selectedElements = useMemo(() => (elements || []).filter((el) => selectedIds.includes(el.id)), [elements, selectedIds]);
   const effectiveType = useMemo<string | null>(() => {
     if (selectedElements.length > 0) {
       const types = new Set(selectedElements.map((e) => e.type));
@@ -1585,7 +1588,7 @@ export default function Whiteboard({ board, boardList }) {
         <rect x="0" y="0" width="100%" height="100%" fill="url(#dotgrid)" />
 
         <g id="content-layer" transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
-          {elements.map((el) =>
+          {(elements || []).map((el) =>
             editingText && editingText.id === el.id ? null : (
               <g key={el.id} opacity={el.opacity} onPointerDown={(e) => handleShapePointerDown(e, el)} style={{ cursor: tool === "select" ? "move" : "inherit" }}>
                 <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} onLabelDoubleClick={(target) => { if (toolRef.current === "select") startLabelEdit(target); }} />
@@ -1795,15 +1798,21 @@ export default function Whiteboard({ board, boardList }) {
                   {isPublic ? "Make private" : "Make public"}
                 </button>
                 {isPublic && shareToken && (
-                  <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
-                    <input
-                      readOnly
-                      value={typeof window !== "undefined" ? `${window.location.origin}/share/${shareToken}` : ""}
-                      onFocus={(e) => e.target.select()}
-                      style={{ flex: 1, minWidth: 0, padding: "6px 8px", borderRadius: 8, border: `1px solid ${theme.panelBorder}`, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", background: isDark ? "#242427" : "white", color: theme.ink }}
-                    />
-                    <button className="icon-btn-sm" style={{ width: 28, height: 28, border: `1px solid ${theme.panelBorder}`, borderRadius: 8 }} title="Copy link" onClick={copyShareLink}><Clipboard size={13} /></button>
-                  </div>
+                  <>
+                    <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+                      <button className={`seg-btn${shareLinkMode === "static" ? " on" : ""}`} style={{ flex: 1 }} onClick={() => setShareLinkMode("static")}>Static</button>
+                      <button className={`seg-btn${shareLinkMode === "dynamic" ? " on" : ""}`} style={{ flex: 1 }} onClick={() => setShareLinkMode("dynamic")}>Dynamic</button>
+                    </div>
+                    <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+                      <input
+                        readOnly
+                        value={typeof window !== "undefined" ? `${window.location.origin}/share/${shareToken}${shareLinkMode === "dynamic" ? "?mode=dynamic" : ""}` : ""}
+                        onFocus={(e) => e.target.select()}
+                        style={{ flex: 1, minWidth: 0, padding: "6px 8px", borderRadius: 8, border: `1px solid ${theme.panelBorder}`, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", background: isDark ? "#242427" : "white", color: theme.ink }}
+                      />
+                      <button className="icon-btn-sm" style={{ width: 28, height: 28, border: `1px solid ${theme.panelBorder}`, borderRadius: 8 }} title="Copy link" onClick={copyShareLink}><Clipboard size={13} /></button>
+                    </div>
+                  </>
                 )}
               </div>
             </div>
