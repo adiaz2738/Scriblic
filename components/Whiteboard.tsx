@@ -41,6 +41,7 @@ import {
   ChevronsDown,
   ChevronUp,
   ChevronsUp,
+  AlertTriangle,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -620,6 +621,7 @@ export default function Whiteboard({ board, boardList }) {
   const [renamingId, setRenamingId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [creatingBoard, setCreatingBoard] = useState(false);
+  const [createBoardError, setCreateBoardError] = useState(null);
   const [isPublic, setIsPublic] = useState(board.isPublic || false);
   const [shareToken, setShareToken] = useState(board.shareToken || null);
   const [sharingBusy, setSharingBusy] = useState(false);
@@ -746,6 +748,7 @@ export default function Whiteboard({ board, boardList }) {
       console.log("[addProject] called from", new Error().stack);
       if (creatingBoard) return null;
       setCreatingBoard(true);
+      setCreateBoardError(null);
       try {
         clearTimeout(saveTimerRef.current);
         await saveNow();
@@ -754,13 +757,15 @@ export default function Whiteboard({ board, boardList }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: name || "Untitled board" }),
         });
-        const data = await res.json();
-        if (data.board) {
-          router.push(`/board/${data.board.id}`);
-          return data.board;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.board) {
+          setCreateBoardError(data.error || "Something went wrong creating the board.");
+          return null;
         }
+        router.push(`/board/${data.board.id}`);
+        return data.board;
       } catch (e) {
-        setToast("Could not create a new board");
+        setCreateBoardError("Something went wrong creating the board.");
       } finally {
         setCreatingBoard(false);
       }
@@ -1633,8 +1638,6 @@ export default function Whiteboard({ board, boardList }) {
 
   const canvasCursor = spaceHeldRef.current || tool === "hand" ? "grab" : tool === "select" ? "default" : tool === "text" ? "text" : tool === "eraser" ? "cell" : tool === "link" || tool === "embed" ? "copy" : "crosshair";
 
-  const sortedProjects = [...projects].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-
   function setTheme(dark) {
     setIsDark(dark);
     window.localStorage.setItem("board-theme", dark ? "dark" : "light");
@@ -1854,35 +1857,62 @@ export default function Whiteboard({ board, boardList }) {
 
           {projectsPanelOpen && (
             <div onPointerDown={(e) => e.stopPropagation()} style={{ position: "relative", marginTop: 6, width: 260, background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 14, boxShadow: theme.shadow, padding: 10, zIndex: 30 }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-                <div className="panel-label" style={{ margin: 0 }}>Boards</div>
-                <button className="icon-btn-sm" onClick={() => addProject()} disabled={creatingBoard}><Plus size={14} /></button>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6, gap: 6 }}>
+                {renamingId === boardId ? (
+                  <input className="proj-name-input" autoFocus defaultValue={boardName} onClick={(e) => e.stopPropagation()}
+                    onBlur={(e) => { renameProject(boardId, e.target.value.trim()); setRenamingId(null); }}
+                    onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") setRenamingId(null); }} />
+                ) : (
+                  <span style={{ fontSize: 13, fontWeight: 600, color: theme.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{boardName}</span>
+                )}
+                <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+                  {confirmDeleteId === boardId ? (
+                    <>
+                      <span style={{ fontSize: 11, color: "#E5484D", fontWeight: 600, marginRight: 2 }}>Delete?</span>
+                      <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); deleteProject(boardId); }} title="Confirm delete" style={{ color: "#E5484D" }}><Check size={14} /></button>
+                      <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); }} title="Cancel"><X size={14} /></button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setRenamingId(boardId); }} title="Rename"><PencilIcon size={12} /></button>
+                      <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(boardId); }} title="Delete"><Trash2 size={12} /></button>
+                      <button className="icon-btn-sm" onClick={() => addProject()} disabled={creatingBoard} title="New board"><Plus size={14} /></button>
+                    </>
+                  )}
+                </div>
               </div>
-              <div style={{ maxHeight: 220, overflowY: "auto", marginBottom: 10 }}>
-                {sortedProjects.map((p) => (
-                  <div key={p.id} className={`proj-row${p.id === boardId ? " active" : ""}`} onClick={() => { setConfirmDeleteId(null); if (renamingId !== p.id) goToBoard(p.id); }}>
-                    {renamingId === p.id ? (
-                      <input className="proj-name-input" autoFocus defaultValue={p.name} onClick={(e) => e.stopPropagation()}
-                        onBlur={(e) => { renameProject(p.id, e.target.value.trim()); setRenamingId(null); }}
-                        onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") setRenamingId(null); }} />
-                    ) : (
-                      <span style={{ fontSize: 13, color: theme.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
-                    )}
-                    {confirmDeleteId === p.id ? (
-                      <>
-                        <span style={{ fontSize: 11, color: "#E5484D", fontWeight: 600, marginRight: 2 }}>Delete?</span>
-                        <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); deleteProject(p.id); }} title="Confirm delete" style={{ color: "#E5484D" }}><Check size={14} /></button>
-                        <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); }} title="Cancel"><X size={14} /></button>
-                      </>
-                    ) : (
-                      <>
-                        <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setRenamingId(p.id); }} title="Rename"><PencilIcon size={12} /></button>
-                        <button className="icon-btn-sm" onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(p.id); }} title="Delete"><Trash2 size={12} /></button>
-                      </>
-                    )}
+
+              {createBoardError && (
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: "#FCEAEA", border: "1px solid #F3C6C6", borderRadius: 10, padding: 10, marginBottom: 10, fontSize: 12, color: "#8A2E32" }}>
+                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, marginBottom: 2 }}>Couldn't create the board</div>
+                    <div style={{ opacity: 0.85, marginBottom: 6 }}>{createBoardError}</div>
+                    <button
+                      onClick={() => addProject()}
+                      disabled={creatingBoard}
+                      style={{ fontSize: 11, fontWeight: 600, color: "#8A2E32", background: "white", border: "1px solid #F3C6C6", borderRadius: 8, padding: "4px 8px", cursor: creatingBoard ? "default" : "pointer", opacity: creatingBoard ? 0.6 : 1 }}
+                    >
+                      Try again
+                    </button>
                   </div>
-                ))}
-              </div>
+                  <button
+                    onClick={() => setCreateBoardError(null)}
+                    title="Dismiss"
+                    style={{ flexShrink: 0, width: 20, height: 20, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "transparent", borderRadius: 6, cursor: "pointer", color: "#8A2E32" }}
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              )}
+
+              <button
+                onClick={() => router.push("/")}
+                style={{ display: "block", background: "none", border: "none", padding: 0, marginBottom: 10, fontSize: 12, color: theme.muted, cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 2 }}
+              >
+                See all boards
+              </button>
+
               <div style={{ borderTop: `1px solid ${theme.panelBorder}`, paddingTop: 10 }}>
                 <div className="panel-label">Background</div>
                 <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>

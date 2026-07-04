@@ -26,6 +26,7 @@ export default function Dashboard({ initialBoards, dbError }: { initialBoards: a
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [createBoardError, setCreateBoardError] = useState<string | null>(null);
   const theme = isDark ? DARK : LIGHT;
 
   useEffect(() => {
@@ -46,14 +47,21 @@ export default function Dashboard({ initialBoards, dbError }: { initialBoards: a
   async function createBoard() {
     console.log("[addProject] called from", new Error().stack);
     setBusy(true);
+    setCreateBoardError(null);
     try {
       const res = await fetch("/api/boards", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: "Untitled board" }),
       });
-      const data = await res.json();
-      if (data.board) router.push(`/board/${data.board.id}`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.board) {
+        setCreateBoardError(data.error || "Something went wrong creating the board.");
+        return;
+      }
+      router.push(`/board/${data.board.id}`);
+    } catch (e) {
+      setCreateBoardError("Something went wrong creating the board.");
     } finally {
       setBusy(false);
     }
@@ -113,6 +121,30 @@ export default function Dashboard({ initialBoards, dbError }: { initialBoards: a
               <div style={{ fontWeight: 600, marginBottom: 2 }}>Can't reach the database</div>
               <div style={{ opacity: 0.85 }}>{dbError} Check DATABASE_URL in your environment variables and make sure schema.sql has been run — see SETUP.md.</div>
             </div>
+          </div>
+        )}
+
+        {createBoardError && (
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: "#FCEAEA", border: "1px solid #F3C6C6", borderRadius: 12, padding: 14, marginBottom: 24, fontSize: 13, color: "#8A2E32" }}>
+            <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 1 }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, marginBottom: 2 }}>Couldn't create the board</div>
+              <div style={{ opacity: 0.85, marginBottom: 8 }}>{createBoardError}</div>
+              <button
+                onClick={createBoard}
+                disabled={busy}
+                style={{ fontSize: 12, fontWeight: 600, color: "#8A2E32", background: "white", border: "1px solid #F3C6C6", borderRadius: 8, padding: "5px 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+              >
+                Try again
+              </button>
+            </div>
+            <button
+              onClick={() => setCreateBoardError(null)}
+              title="Dismiss"
+              style={{ flexShrink: 0, width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", border: "none", background: "transparent", borderRadius: 6, cursor: "pointer", color: "#8A2E32" }}
+            >
+              <X size={14} />
+            </button>
           </div>
         )}
 
