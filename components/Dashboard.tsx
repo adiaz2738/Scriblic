@@ -115,7 +115,7 @@ export default function Dashboard({ initialBoards, dbError }: { initialBoards: a
       <div style={{ maxWidth: 880, margin: "0 auto", padding: "56px 24px" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <img src="/logo.svg" alt="Scriblic" width={20} height={20} style={{ display: "block" }} />
+            <img src="/icon.png" alt="Scriblic" width={22} height={22} style={{ display: "block", borderRadius: 6 }} />
             <span style={{ fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 15, color: theme.ink, letterSpacing: "-0.01em" }}>
               criblic
             </span>

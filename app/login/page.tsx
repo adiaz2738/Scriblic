@@ -57,7 +57,7 @@ function LoginForm() {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-          <img src="/logo.svg" alt="Scriblic" width={18} height={18} style={{ display: "block" }} />
+          <img src="/icon.png" alt="Scriblic" width={20} height={20} style={{ display: "block", borderRadius: 5 }} />
           <span style={{ fontFamily: "'Inter', sans-serif", fontSize: 15, fontWeight: 700, color: "#232326", letterSpacing: "-0.01em" }}>criblic</span>
         </div>
         <div style={{ fontSize: 13, color: "#9A9AA2", marginBottom: 18 }}>Enter the password to continue.</div>
