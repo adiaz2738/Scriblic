@@ -667,6 +667,7 @@ export default function Whiteboard({ board, boardList }) {
 
   const [isDark, setIsDark] = useState(false);
   const theme = isDark ? DARK : LIGHT;
+  const [showGrid, setShowGrid] = useState(false);
 
   const [projects, setProjects] = useState(boardList);
   const [boardName, setBoardName] = useState(board.name);
@@ -739,6 +740,8 @@ export default function Whiteboard({ board, boardList }) {
   useEffect(() => {
     const saved = typeof window !== "undefined" ? window.localStorage.getItem("board-theme") : null;
     if (saved === "dark") setIsDark(true);
+    const savedGrid = typeof window !== "undefined" ? window.localStorage.getItem("board-grid") : null;
+    if (savedGrid === "true") setShowGrid(true);
   }, []);
 
   useEffect(() => {
@@ -1728,6 +1731,11 @@ export default function Whiteboard({ board, boardList }) {
     applyCanvasBackground(bg);
   }
 
+  function toggleGrid(next) {
+    setShowGrid(next);
+    window.localStorage.setItem("board-grid", next ? "true" : "false");
+  }
+
   const saveLabel = saveStatus === "saving" ? "Saving…" : saveStatus === "error" ? "Save failed" : saveStatus === "idle" ? "Unsaved" : "Saved";
 
   return (
@@ -1761,7 +1769,7 @@ export default function Whiteboard({ board, boardList }) {
           </pattern>
         </defs>
         <rect x="0" y="0" width="100%" height="100%" fill={canvasBg} />
-        <rect x="0" y="0" width="100%" height="100%" fill="url(#dotgrid)" />
+        {showGrid && <rect x="0" y="0" width="100%" height="100%" fill="url(#dotgrid)" />}
 
         <g id="content-layer" transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
           {(elements || []).map((el) => {
@@ -2010,6 +2018,16 @@ export default function Whiteboard({ board, boardList }) {
                   {CANVAS_BACKGROUNDS.map((c) => (
                     <div key={c.value} className={`swatch${canvasBg === c.value ? " selected" : ""}`} style={{ background: c.value, border: c.value === "#FFFFFF" ? "1px solid #E6E6E1" : "2px solid transparent" }} title={c.name} onClick={() => applyCanvasBackground(c.value)} />
                   ))}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                  <div className="panel-label" style={{ marginBottom: 0 }}>Grid</div>
+                  <button
+                    onClick={() => toggleGrid(!showGrid)}
+                    title="Toggle dot grid"
+                    style={{ position: "relative", width: 34, height: 19, borderRadius: 10, border: "none", padding: 0, cursor: "pointer", background: showGrid ? "#4C5FF7" : theme.panelBorder, transition: "background 120ms ease" }}
+                  >
+                    <span style={{ position: "absolute", top: 2, left: showGrid ? 17 : 2, width: 15, height: 15, borderRadius: "50%", background: "white", transition: "left 120ms ease", boxShadow: "0 1px 2px rgba(0,0,0,0.25)" }} />
+                  </button>
                 </div>
                 <div className="panel-label">Theme</div>
                 <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
