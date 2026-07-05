@@ -135,6 +135,16 @@ const BOX_TYPES = ["rectangle", "diamond", "ellipse", "text", "image", "embed", 
 const LABELABLE_TYPES = ["rectangle", "diamond", "ellipse"];
 const EDGE_TYPES = ["rectangle", "diamond"];
 const EDGES = [{ label: "Sharp", value: "sharp" }, { label: "Round", value: "round" }];
+const ARROW_TYPES = [{ label: "Straight", value: "straight" }, { label: "Elbow", value: "elbow" }];
+
+function elbowPoints(p1, p2) {
+  const midX = p1.x + (p2.x - p1.x) / 2;
+  if (Math.abs(p2.x - p1.x) > Math.abs(p2.y - p1.y)) {
+    return [p1, { x: midX, y: p1.y }, { x: midX, y: p2.y }, p2];
+  }
+  const midY = p1.y + (p2.y - p1.y) / 2;
+  return [p1, { x: p1.x, y: midY }, { x: p2.x, y: midY }, p2];
+}
 
 function relativeLuminance(hex) {
   const c = hex.replace("#", "");
@@ -431,10 +441,20 @@ function measureText(text, fontSize) {
   const longest = Math.max(1, ...lines.map((l) => l.length));
   return { width: Math.max(30, longest * fontSize * 0.56), height: Math.max(fontSize * 1.35, lines.length * fontSize * 1.35) };
 }
+const LABEL_PADDING = 24;
+function growBoxForLabel(box, text, fontSize) {
+  const measured = measureText(text || " ", fontSize);
+  const w = Math.max(box.w, measured.width + LABEL_PADDING * 2);
+  const h = Math.max(box.h, measured.height + LABEL_PADDING * 2);
+  if (w === box.w && h === box.h) return box;
+  const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+  return { x: cx - w / 2, y: cy - h / 2, w, h };
+}
 function createShapeElement(type, x, y, style) {
   const base = { id: genId(), type, stroke: style.stroke, fill: style.fill, strokeWidth: style.strokeWidth, roughness: style.roughness, opacity: style.opacity, seed: Math.floor(Math.random() * 100000) + 1 };
   if (type === "rectangle" || type === "diamond" || type === "ellipse") return { ...base, x, y, w: 0, h: 0, edges: style.edges };
-  if (type === "line" || type === "arrow") return { ...base, points: [{ x, y }, { x, y }] };
+  if (type === "arrow") return { ...base, points: [{ x, y }, { x, y }], arrowType: style.arrowType };
+  if (type === "line") return { ...base, points: [{ x, y }, { x, y }] };
   if (type === "freehand") return { ...base, points: [{ x, y }] };
   return base;
 }
@@ -487,7 +507,7 @@ function ShapeLabel({ el, hidden }) {
   const lineHeight = fontSize * 1.3;
   const startY = cy - ((lines.length - 1) * lineHeight) / 2;
   return (
-    <text x={cx} y={startY} textAnchor="middle" dominantBaseline="middle" fontFamily="'Kalam', cursive" fontSize={fontSize} fill={el.stroke} style={{ userSelect: "none" }}>
+    <text x={cx} y={startY} textAnchor="middle" dominantBaseline="middle" fontFamily="'Kalam', cursive" fontSize={fontSize} fill={el.stroke} style={{ userSelect: "none", pointerEvents: "none" }}>
       {lines.map((line, i) => (
         <tspan key={i} x={cx} y={startY + i * lineHeight}>{line || " "}</tspan>
       ))}
@@ -545,10 +565,15 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
   }
   if (type === "line" || type === "arrow") {
     const [p1, p2] = el.points;
-    const d = sketchyPath([[p1.x, p1.y], [p2.x, p2.y]], seed, roughness, false);
+    const isElbow = type === "arrow" && el.arrowType === "elbow";
+    const elbowPts = isElbow ? elbowPoints(p1, p2) : null;
+    const d = isElbow
+      ? sketchyPath(elbowPts.map((p) => [p.x, p.y]), seed, roughness, false)
+      : sketchyPath([[p1.x, p1.y], [p2.x, p2.y]], seed, roughness, false);
     let head = null;
     if (type === "arrow") {
-      const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+      const [lastFrom, lastTo] = isElbow ? elbowPts.slice(-2) : [p1, p2];
+      const angle = Math.atan2(lastTo.y - lastFrom.y, lastTo.x - lastFrom.x);
       const len = 14 + el.strokeWidth * 2;
       const a1 = angle + Math.PI - 0.4, a2 = angle + Math.PI + 0.4;
       const h1 = [p2.x + len * Math.cos(a1), p2.y + len * Math.sin(a1)];
@@ -631,7 +656,7 @@ export default function Whiteboard({ board, boardList }) {
   const [canvasBg, setCanvasBg] = useState(board.canvasBg || CANVAS_BACKGROUNDS[0].value);
   const [selectedIds, setSelectedIds] = useState([]);
   const [tool, setTool] = useState("select");
-  const [style, setStyle] = useState({ stroke: STROKE_COLORS[0].value, fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, edges: "sharp" });
+  const [style, setStyle] = useState({ stroke: STROKE_COLORS[0].value, fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, edges: "sharp", arrowType: "straight" });
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [marquee, setMarquee] = useState(null);
@@ -653,6 +678,9 @@ export default function Whiteboard({ board, boardList }) {
   const containerRef = useRef(null);
   const svgRef = useRef(null);
   const elementsRef = useRef(elements);
+  const pastRef = useRef(past);
+  const futureRef = useRef(future);
+  const editingLabelRef = useRef(editingLabel);
   const canvasBgRef = useRef(canvasBg);
   const lastDefaultStrokeRef = useRef(STROKE_COLORS[0].value);
   const panRef = useRef(pan);
@@ -670,6 +698,9 @@ export default function Whiteboard({ board, boardList }) {
   const isFirstRenderRef = useRef(true);
 
   useEffect(() => { elementsRef.current = elements; }, [elements]);
+  useEffect(() => { pastRef.current = past; }, [past]);
+  useEffect(() => { futureRef.current = future; }, [future]);
+  useEffect(() => { editingLabelRef.current = editingLabel; }, [editingLabel]);
   useEffect(() => { canvasBgRef.current = canvasBg; }, [canvasBg]);
   useEffect(() => { panRef.current = pan; }, [pan]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
@@ -874,26 +905,24 @@ export default function Whiteboard({ board, boardList }) {
     }
   }, []);
   const undo = useCallback(() => {
-    setPast((p) => {
-      if (p.length === 0) return p;
-      const prev = p[p.length - 1] || [];
-      const current = elementsRef.current || [];
-      setFuture((f) => [current, ...f]);
-      setElements(prev);
-      setSelectedIds([]);
-      return p.slice(0, -1);
-    });
+    const p = pastRef.current;
+    if (p.length === 0) return;
+    const prev = p[p.length - 1] || [];
+    const current = elementsRef.current || [];
+    setPast(p.slice(0, -1));
+    setFuture([current, ...futureRef.current]);
+    setElements(prev);
+    setSelectedIds([]);
   }, []);
   const redo = useCallback(() => {
-    setFuture((f) => {
-      if (f.length === 0) return f;
-      const next = f[0] || [];
-      const current = elementsRef.current || [];
-      setPast((p) => [...p, current]);
-      setElements(next);
-      setSelectedIds([]);
-      return f.slice(1);
-    });
+    const f = futureRef.current;
+    if (f.length === 0) return;
+    const next = f[0] || [];
+    const current = elementsRef.current || [];
+    setFuture(f.slice(1));
+    setPast([...pastRef.current, current]);
+    setElements(next);
+    setSelectedIds([]);
   }, []);
 
   /* ---------- coordinate transforms ---------- */
@@ -1005,31 +1034,45 @@ export default function Whiteboard({ board, boardList }) {
 
   const finishLabelEdit = useCallback(
     (commit) => {
-      setEditingLabel((draft) => {
-        if (!draft) return null;
-        if (commit) {
-          const text = draft.text.trim();
-          beginChange();
-          setElements((prev) =>
-            prev.map((el) => {
-              if (el.id !== draft.id) return el;
-              if (text === "") return { ...el, label: undefined };
-              const b = getBBox(el);
-              const labelFontSize = Math.max(12, Math.min(28, Math.min(b.w, b.h) * 0.22));
-              return { ...el, label: text, labelFontSize };
-            })
-          );
-          endChange();
-        }
-        return null;
-      });
+      const draft = editingLabelRef.current;
+      if (!draft) return;
+      if (commit) {
+        const text = draft.text.trim();
+        setElements(
+          elementsRef.current.map((el) => {
+            if (el.id !== draft.id) return el;
+            if (text === "") return { ...el, label: undefined, x: draft.x, y: draft.y, w: draft.w, h: draft.h };
+            return { ...el, label: text, labelFontSize: draft.fontSize, x: draft.x, y: draft.y, w: draft.w, h: draft.h };
+          })
+        );
+        endChange();
+      } else if (snapshotRef.current !== null) {
+        // Escape: discard any live growth from this editing session, revert to pre-edit state.
+        setElements(snapshotRef.current);
+        snapshotRef.current = null;
+      }
+      setEditingLabel(null);
     },
-    [beginChange, endChange]
+    [endChange]
   );
 
-  const startLabelEdit = useCallback((el) => {
-    const b = getBBox(el);
-    setEditingLabel({ id: el.id, x: b.x, y: b.y, w: b.w, h: b.h, text: el.label || "", fontSize: el.labelFontSize || 16, stroke: el.stroke });
+  const startLabelEdit = useCallback(
+    (el) => {
+      const b = getBBox(el);
+      beginChange();
+      setEditingLabel({ id: el.id, x: b.x, y: b.y, w: b.w, h: b.h, text: el.label || "", fontSize: el.labelFontSize || 16, stroke: el.stroke });
+    },
+    [beginChange]
+  );
+
+  const onLabelTextChange = useCallback((text) => {
+    const draft = editingLabelRef.current;
+    if (!draft) return;
+    const grown = growBoxForLabel(draft, text, draft.fontSize);
+    if (grown !== draft) {
+      setElements(elementsRef.current.map((el) => (el.id === draft.id ? { ...el, x: grown.x, y: grown.y, w: grown.w, h: grown.h } : el)));
+    }
+    setEditingLabel({ ...draft, text, x: grown.x, y: grown.y, w: grown.w, h: grown.h });
   }, []);
 
   const onWindowPointerMove = useCallback(
@@ -1784,7 +1827,7 @@ export default function Whiteboard({ board, boardList }) {
         <textarea
           ref={labelTextareaRef}
           value={editingLabel.text}
-          onChange={(e) => setEditingLabel((d) => ({ ...d, text: e.target.value }))}
+          onChange={(e) => onLabelTextChange(e.target.value)}
           onBlur={() => finishLabelEdit(true)}
           onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Escape") { e.currentTarget.blur(); finishLabelEdit(false); } }}
           style={{
@@ -2054,6 +2097,17 @@ export default function Whiteboard({ board, boardList }) {
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 {ROUGHNESS.map((r) => (
                   <button key={r.value} className={`seg-btn${style.roughness === r.value ? " on" : ""}`} style={{ width: "100%" }} onClick={() => updateSelectedStyle({ roughness: r.value })}>{r.label}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {effectiveType === "arrow" && (
+            <div>
+              <div className="panel-label">Arrow type</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {ARROW_TYPES.map((opt) => (
+                  <button key={opt.value} className={`seg-btn${style.arrowType === opt.value ? " on" : ""}`} style={{ width: "100%" }} onClick={() => updateSelectedStyle({ arrowType: opt.value })}>{opt.label}</button>
                 ))}
               </div>
             </div>
