@@ -257,10 +257,11 @@ function roundedPolygonPath(points, radius) {
   }
   return d + "Z";
 }
-function ellipsePoints(cx, cy, rx, ry, segments = 20) {
+function ellipsePoints(cx, cy, rx, ry, segments = undefined) {
+  const n = segments || Math.max(24, Math.min(96, Math.round((rx + ry) * 0.5)));
   const pts = [];
-  for (let i = 0; i < segments; i++) {
-    const a = (i / segments) * Math.PI * 2;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
     pts.push([cx + rx * Math.cos(a), cy + ry * Math.sin(a)]);
   }
   return pts;
@@ -295,6 +296,12 @@ function rectsIntersect(a, b) {
 // Finds edge/center alignments between activeBBox and every other element's
 // bbox, within `threshold` world units. Returns guide lines to render plus
 // the `delta` needed to snap the active shape onto each match.
+// Each guide is tagged with which part of activeBBox produced it ('left'/
+// 'right'/'centerX' for vertical, 'top'/'bottom'/'centerY' for horizontal)
+// so callers can tell a coincidental match on a STATIC edge (e.g. the left
+// edge during an "e"-handle resize, which never moves) apart from a match
+// on the edge actually being dragged — only the latter should drive a snap,
+// though both are worth *displaying* as confirmation.
 function getAlignmentGuides(activeBBox, otherElements, threshold = 6) {
   const guides = { vertical: [], horizontal: [] };
   const aLeft = activeBBox.x, aRight = activeBBox.x + activeBBox.w;
@@ -305,14 +312,21 @@ function getAlignmentGuides(activeBBox, otherElements, threshold = 6) {
     const b = getBBox(el);
     const oLeft = b.x, oRight = b.x + b.w, oCenterX = b.x + b.w / 2;
     const oTop = b.y, oBottom = b.y + b.h, oCenterY = b.y + b.h / 2;
-    for (const [a, o] of [[aLeft, oLeft], [aRight, oRight], [aCenterX, oCenterX], [aLeft, oRight], [aRight, oLeft]]) {
-      if (Math.abs(a - o) <= threshold) guides.vertical.push({ pos: o, y1: Math.min(aTop, oTop) - 20, y2: Math.max(aBottom, oBottom) + 20, delta: o - a });
+    for (const [edge, a, o] of [["left", aLeft, oLeft], ["right", aRight, oRight], ["centerX", aCenterX, oCenterX], ["left", aLeft, oRight], ["right", aRight, oLeft]]) {
+      if (Math.abs(a - o) <= threshold) guides.vertical.push({ pos: o, y1: Math.min(aTop, oTop) - 20, y2: Math.max(aBottom, oBottom) + 20, delta: o - a, edge });
     }
-    for (const [a, o] of [[aTop, oTop], [aBottom, oBottom], [aCenterY, oCenterY], [aTop, oBottom], [aBottom, oTop]]) {
-      if (Math.abs(a - o) <= threshold) guides.horizontal.push({ pos: o, x1: Math.min(aLeft, oLeft) - 20, x2: Math.max(aRight, oRight) + 20, delta: o - a });
+    for (const [edge, a, o] of [["top", aTop, oTop], ["bottom", aBottom, oBottom], ["centerY", aCenterY, oCenterY], ["top", aTop, oBottom], ["bottom", aBottom, oTop]]) {
+      if (Math.abs(a - o) <= threshold) guides.horizontal.push({ pos: o, x1: Math.min(aLeft, oLeft) - 20, x2: Math.max(aRight, oRight) + 20, delta: o - a, edge });
     }
   }
   return guides;
+}
+// Picks the smallest-delta guide whose tagged edge is one the active
+// operation can actually move (see getAlignmentGuides comment above).
+function bestGuideForEdges(list, allowedEdges) {
+  return list
+    .filter((g) => allowedEdges.includes(g.edge))
+    .reduce((best, cur) => (!best || Math.abs(cur.delta) < Math.abs(best.delta) ? cur : best), null);
 }
 function distToSegment(px, py, x1, y1, x2, y2) {
   const dx = x2 - x1, dy = y2 - y1;
@@ -450,11 +464,11 @@ function getFocusedBindPoint(el, focus, otherX, otherY, gap = 6) {
   return { x: x + gx * gap, y: y + gy * gap };
 }
 const BINDABLE_TYPES = ["rectangle", "diamond", "ellipse", "image", "embed", "link"];
-function findBindTarget(elements, x, y, excludeId) {
+function findBindTarget(elements, x, y, excludeId, threshold = 6) {
   for (let i = elements.length - 1; i >= 0; i--) {
     const el = elements[i];
     if (el.id === excludeId || !BINDABLE_TYPES.includes(el.type)) continue;
-    if (hitTestPoint(el, x, y, 6)) return el;
+    if (hitTestPoint(el, x, y, threshold)) return el;
   }
   return null;
 }
@@ -759,11 +773,12 @@ export default function Whiteboard({ board, boardList }) {
   const [canvasBg, setCanvasBg] = useState(board.canvasBg || CANVAS_BACKGROUNDS[0].value);
   const [selectedIds, setSelectedIds] = useState([]);
   const [tool, setTool] = useState("select");
-  const [style, setStyle] = useState(() => ({ stroke: defaultStrokeForBg(board.canvasBg || CANVAS_BACKGROUNDS[0].value), fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, edges: "sharp", arrowType: "straight" }));
+  const [style, setStyle] = useState(() => ({ stroke: defaultStrokeForBg(board.canvasBg || CANVAS_BACKGROUNDS[0].value), fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, edges: "sharp", arrowType: "elbow" }));
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [marquee, setMarquee] = useState(null);
   const [hoverBindTargetId, setHoverBindTargetId] = useState(null);
+  const [hoveredElementId, setHoveredElementId] = useState(null);
   const [alignmentGuides, setAlignmentGuides] = useState(null);
   const [laserTrail, setLaserTrail] = useState([]);
   const [presentationMode, setPresentationMode] = useState(false);
@@ -1196,32 +1211,46 @@ export default function Whiteboard({ board, boardList }) {
         return;
       }
       if (drag.mode === "shape-draw") {
-        setElements((prev) =>
-          prev.map((el) => {
-            if (el.id !== drag.id) return el;
-            if (el.type === "rectangle" || el.type === "diamond" || el.type === "ellipse") {
-              const rawW = x - drag.startX, rawH = y - drag.startY;
-              let w = Math.abs(rawW), h = Math.abs(rawH);
-              if (e.shiftKey) {
-                const m = Math.max(w, h);
-                w = m; h = m;
-              }
-              let nx, ny;
-              if (e.altKey) {
-                nx = drag.startX - w / 2;
-                ny = drag.startY - h / 2;
-              } else {
-                nx = rawW >= 0 ? drag.startX : drag.startX - w;
-                ny = rawH >= 0 ? drag.startY : drag.startY - h;
-              }
-              return { ...el, x: nx, y: ny, w, h };
+        const activeEl = elementsRef.current.find((e2) => e2.id === drag.id);
+        let guides = null;
+        let patch = null;
+        if (activeEl && (activeEl.type === "rectangle" || activeEl.type === "diamond" || activeEl.type === "ellipse")) {
+          const rawW = x - drag.startX, rawH = y - drag.startY;
+          let w = Math.abs(rawW), h = Math.abs(rawH);
+          if (e.shiftKey) {
+            const m = Math.max(w, h);
+            w = m; h = m;
+          }
+          const anchorXY = (ww, hh) =>
+            e.altKey
+              ? { x: drag.startX - ww / 2, y: drag.startY - hh / 2 }
+              : { x: rawW >= 0 ? drag.startX : drag.startX - ww, y: rawH >= 0 ? drag.startY : drag.startY - hh };
+          let { x: nx, y: ny } = anchorXY(w, h);
+          if (e.ctrlKey) {
+            const proposedBBox = { x: nx, y: ny, w, h };
+            const others = elementsRef.current.filter((e2) => e2.id !== drag.id);
+            const g = getAlignmentGuides(proposedBBox, others, 8 / zoomRef.current);
+            const bestV = bestGuideForEdges(g.vertical, [rawW >= 0 ? "right" : "left"]);
+            const bestH = bestGuideForEdges(g.horizontal, [rawH >= 0 ? "bottom" : "top"]);
+            if (bestV) {
+              w = Math.max(4, rawW >= 0 ? w + bestV.delta : w - bestV.delta);
             }
-            if (el.type === "line" || el.type === "arrow") return { ...el, points: [el.points[0], { x, y }] };
-            return el;
-          })
-        );
+            if (bestH) {
+              h = Math.max(4, rawH >= 0 ? h + bestH.delta : h - bestH.delta);
+            }
+            if (g.vertical.length || g.horizontal.length) {
+              guides = g;
+              ({ x: nx, y: ny } = anchorXY(w, h));
+            }
+          }
+          patch = { x: nx, y: ny, w, h };
+        } else if (activeEl && (activeEl.type === "line" || activeEl.type === "arrow")) {
+          patch = { points: [activeEl.points[0], { x, y }] };
+        }
+        setAlignmentGuides(guides);
+        setElements((prev) => prev.map((el) => (el.id === drag.id && patch ? { ...el, ...patch } : el)));
         if (drag.arrowDraw) {
-          const target = findBindTarget(elementsRef.current, x, y, drag.id);
+          const target = findBindTarget(elementsRef.current, x, y, drag.id, 10 / zoomRef.current);
           setHoverBindTargetId(target ? target.id : null);
         }
         return;
@@ -1249,12 +1278,12 @@ export default function Whiteboard({ board, boardList }) {
           if (bx1 !== Infinity) {
             const proposedBBox = { x: bx1, y: by1, w: bx2 - bx1, h: by2 - by1 };
             const others = currentEls.filter((el) => !movingIds.has(el.id));
-            const g = getAlignmentGuides(proposedBBox, others);
-            const bestV = g.vertical.reduce((best, cur) => (!best || Math.abs(cur.delta) < Math.abs(best.delta) ? cur : best), null);
-            const bestH = g.horizontal.reduce((best, cur) => (!best || Math.abs(cur.delta) < Math.abs(best.delta) ? cur : best), null);
+            const g = getAlignmentGuides(proposedBBox, others, 8 / zoomRef.current);
+            const bestV = bestGuideForEdges(g.vertical, ["left", "right", "centerX"]);
+            const bestH = bestGuideForEdges(g.horizontal, ["top", "bottom", "centerY"]);
             if (bestV) snapDx = rawDx + bestV.delta;
             if (bestH) snapDy = rawDy + bestH.delta;
-            if (bestV || bestH) guides = { vertical: bestV ? [bestV] : [], horizontal: bestH ? [bestH] : [] };
+            if (g.vertical.length || g.horizontal.length) guides = g;
           }
         }
         setAlignmentGuides(guides);
@@ -1297,9 +1326,9 @@ export default function Whiteboard({ board, boardList }) {
           if (e.ctrlKey && ALIGNABLE_TYPES.includes(activeEl.type)) {
             const proposedBBox = { x: nx, y: ny, w: nw, h: nh };
             const others = elementsRef.current.filter((e2) => e2.id !== drag.id);
-            const g = getAlignmentGuides(proposedBBox, others);
-            const bestV = affectsX ? g.vertical.reduce((best, cur) => (!best || Math.abs(cur.delta) < Math.abs(best.delta) ? cur : best), null) : null;
-            const bestH = affectsY ? g.horizontal.reduce((best, cur) => (!best || Math.abs(cur.delta) < Math.abs(best.delta) ? cur : best), null) : null;
+            const g = getAlignmentGuides(proposedBBox, others, 8 / zoomRef.current);
+            const bestV = affectsX ? bestGuideForEdges(g.vertical, [h.includes("e") ? "right" : "left"]) : null;
+            const bestH = affectsY ? bestGuideForEdges(g.horizontal, [h.includes("s") ? "bottom" : "top"]) : null;
             if (bestV) {
               if (h.includes("e")) nw += bestV.delta;
               else if (h.includes("w")) nw -= bestV.delta;
@@ -1310,8 +1339,8 @@ export default function Whiteboard({ board, boardList }) {
               else if (h.includes("n")) nh -= bestH.delta;
               nh = Math.max(4, nh);
             }
-            if (bestV || bestH) {
-              guides = { vertical: bestV ? [bestV] : [], horizontal: bestH ? [bestH] : [] };
+            if (g.vertical.length || g.horizontal.length) {
+              guides = g;
               ({ x: nx, y: ny } = anchorXY(nw, nh));
             }
           }
@@ -1323,7 +1352,7 @@ export default function Whiteboard({ board, boardList }) {
           return updateBoundArrows(next, new Set([drag.id]));
         });
         if (drag.arrowEndpointResize) {
-          const target = findBindTarget(elementsRef.current, x, y, drag.id);
+          const target = findBindTarget(elementsRef.current, x, y, drag.id, 10 / zoomRef.current);
           setHoverBindTargetId(target ? target.id : null);
         }
         return;
@@ -1361,13 +1390,13 @@ export default function Whiteboard({ board, boardList }) {
                 if (e.id !== drag.id) return e;
                 let [p0, p1] = e.points;
                 let startBinding = null, endBinding = null;
-                const startTarget = findBindTarget(prev, p0.x, p0.y, e.id);
+                const startTarget = findBindTarget(prev, p0.x, p0.y, e.id, 10 / zoomRef.current);
                 if (startTarget) {
                   const bound = getArrowBindPoint(e.arrowType, startTarget, p1.x, p1.y);
                   startBinding = { elementId: startTarget.id, focus: bound.focus, side: bound.side };
                   p0 = bound.point;
                 }
-                const endTarget = findBindTarget(prev, p1.x, p1.y, e.id);
+                const endTarget = findBindTarget(prev, p1.x, p1.y, e.id, 10 / zoomRef.current);
                 if (endTarget) {
                   const bound = getArrowBindPoint(e.arrowType, endTarget, p0.x, p0.y);
                   endBinding = { elementId: endTarget.id, focus: bound.focus, side: bound.side };
@@ -1382,6 +1411,7 @@ export default function Whiteboard({ board, boardList }) {
         }
         setTool("select");
         setHoverBindTargetId(null);
+        setAlignmentGuides(null);
       } else if (drag.mode === "freehand-draw") {
         const el = elementsRef.current.find((e) => e.id === drag.id);
         if (el && el.points.length < 2) {
@@ -1399,7 +1429,7 @@ export default function Whiteboard({ board, boardList }) {
             const point = el.points[drag.handle];
             const bindKey = drag.handle === 0 ? "startBinding" : "endBinding";
             const otherPoint = el.points[drag.handle === 0 ? 1 : 0];
-            const target = findBindTarget(elementsRef.current, point.x, point.y, el.id);
+            const target = findBindTarget(elementsRef.current, point.x, point.y, el.id, 10 / zoomRef.current);
             setElements((prev) =>
               prev.map((e) => {
                 if (e.id !== el.id) return e;
@@ -1932,11 +1962,38 @@ export default function Whiteboard({ board, boardList }) {
               elbowEndAxis = endTarget ? boundExitAxis(getBBox(endTarget), otherForEnd.x, otherForEnd.y) : undefined;
             }
             return (
-              <g key={el.id} opacity={el.opacity} onPointerDown={(e) => handleShapePointerDown(e, el)} style={{ cursor: tool === "select" ? "move" : "inherit" }}>
+              <g
+                key={el.id}
+                opacity={el.opacity}
+                onPointerDown={(e) => handleShapePointerDown(e, el)}
+                onPointerEnter={() => { if (toolRef.current === "select") setHoveredElementId(el.id); }}
+                onPointerLeave={() => setHoveredElementId((h) => (h === el.id ? null : h))}
+                style={{ cursor: tool === "select" ? "move" : "inherit" }}
+              >
                 <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} onLabelDoubleClick={(target) => { if (toolRef.current === "select") startLabelEdit(target); }} isSelected={selectedIds.includes(el.id)} elbowStartAxis={elbowStartAxis} elbowEndAxis={elbowEndAxis} />
               </g>
             );
           })}
+
+          {(() => {
+            const indicatorArrows = elements.filter(
+              (el) =>
+                (el.type === "arrow" || el.type === "line") &&
+                (el.startBinding || el.endBinding) &&
+                (selectedIds.includes(el.id) || hoveredElementId === el.id)
+            );
+            if (indicatorArrows.length === 0) return null;
+            return (
+              <g pointerEvents="none">
+                {indicatorArrows.map((el) => (
+                  <g key={el.id}>
+                    {el.startBinding && <circle cx={el.points[0].x} cy={el.points[0].y} r={5.5 / zoom} stroke="#4C5FF7" strokeWidth={1.5 / zoom} fill="white" />}
+                    {el.endBinding && <circle cx={el.points[1].x} cy={el.points[1].y} r={5.5 / zoom} stroke="#4C5FF7" strokeWidth={1.5 / zoom} fill="white" />}
+                  </g>
+                ))}
+              </g>
+            );
+          })()}
 
           {linkDraft && <rect x={linkDraft.x} y={linkDraft.y} width={linkDraft.w} height={linkDraft.h} rx={12} fill="#EEF1FF" stroke="#4C5FF7" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.5} />}
           {embedDraft && <rect x={embedDraft.x} y={embedDraft.y} width={embedDraft.w} height={embedDraft.h} rx={8} fill="none" stroke="#4C5FF7" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.5} />}
