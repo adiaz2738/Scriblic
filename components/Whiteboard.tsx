@@ -368,6 +368,17 @@ function computeBindFocus(bbox, boundaryPt) {
   if (Math.abs(focus) < BIND_FOCUS_SNAP_THRESHOLD) focus = 0;
   return focus;
 }
+// Which specific side ('l'/'r'/'t'/'b') of a bbox faces a given point —
+// combines the dominant-axis test with the sign of the offset so bindings
+// can detect when the facing side has actually changed.
+function computeBindSide(bbox, otherX, otherY) {
+  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
+  const dx = otherX - cx, dy = otherY - cy;
+  const nx = Math.abs(dx) / (bbox.w / 2 || 1e-6);
+  const ny = Math.abs(dy) / (bbox.h / 2 || 1e-6);
+  if (nx >= ny) return dx >= 0 ? "r" : "l";
+  return dy >= 0 ? "b" : "t";
+}
 function getBindPointWithFocus(el, fromX, fromY, gap = 6) {
   const bbox = getBBox(el);
   const pt =
@@ -378,7 +389,8 @@ function getBindPointWithFocus(el, fromX, fromY, gap = 6) {
   const dx = pt.x - cx, dy = pt.y - cy;
   const len = Math.hypot(dx, dy) || 1;
   const focus = computeBindFocus(bbox, pt);
-  return { point: { x: pt.x + (dx / len) * gap, y: pt.y + (dy / len) * gap }, focus };
+  const side = computeBindSide(bbox, fromX, fromY);
+  return { point: { x: pt.x + (dx / len) * gap, y: pt.y + (dy / len) * gap }, focus, side };
 }
 // Re-derives a bound endpoint straight from the shape's current bbox and
 // the stored `focus`, so it stays locked to the same relative position on
@@ -416,6 +428,20 @@ function centerOf(el) {
   const b = getBBox(el);
   return { x: b.x + b.w / 2, y: b.y + b.h / 2 };
 }
+// Re-derives a bound endpoint against the shape's current bbox. If the side
+// of the shape now facing the other endpoint differs from the side the
+// binding's `focus` was last computed against, `focus` is re-derived fresh
+// against the new facing side (same calculation used at bind-creation time)
+// so the endpoint re-anchors instead of sliding along the stale side.
+function getBoundEndpoint(target, binding, otherX, otherY, gap = 6) {
+  const bbox = getBBox(target);
+  const newSide = computeBindSide(bbox, otherX, otherY);
+  if (newSide !== binding.side) {
+    const bound = getBindPointWithFocus(target, otherX, otherY, gap);
+    return { point: bound.point, binding: { elementId: binding.elementId, focus: bound.focus, side: bound.side } };
+  }
+  return { point: getFocusedBindPoint(target, binding.focus || 0, otherX, otherY, gap), binding };
+}
 function updateBoundArrows(elements, updatedIds) {
   const byId = new Map(elements.map((el) => [el.id, el]));
   return elements.map((el) => {
@@ -424,21 +450,26 @@ function updateBoundArrows(elements, updatedIds) {
     const endBoundUpdated = el.endBinding && updatedIds.has(el.endBinding.elementId);
     if (!startBoundUpdated && !endBoundUpdated) return el;
     let [p0, p1] = el.points;
-    if (startBoundUpdated) {
-      const target = byId.get(el.startBinding.elementId);
+    let startBinding = el.startBinding, endBinding = el.endBinding;
+    if (startBinding) {
+      const target = byId.get(startBinding.elementId);
       if (target) {
-        const other = el.endBinding ? centerOf(byId.get(el.endBinding.elementId) || target) : p1;
-        p0 = getFocusedBindPoint(target, el.startBinding.focus || 0, other.x, other.y);
+        const other = endBinding ? centerOf(byId.get(endBinding.elementId) || target) : p1;
+        const result = getBoundEndpoint(target, startBinding, other.x, other.y);
+        p0 = result.point;
+        startBinding = result.binding;
       }
     }
-    if (endBoundUpdated) {
-      const target = byId.get(el.endBinding.elementId);
+    if (endBinding) {
+      const target = byId.get(endBinding.elementId);
       if (target) {
-        const other = el.startBinding ? centerOf(byId.get(el.startBinding.elementId) || target) : p0;
-        p1 = getFocusedBindPoint(target, el.endBinding.focus || 0, other.x, other.y);
+        const other = startBinding ? centerOf(byId.get(startBinding.elementId) || target) : p0;
+        const result = getBoundEndpoint(target, endBinding, other.x, other.y);
+        p1 = result.point;
+        endBinding = result.binding;
       }
     }
-    return { ...el, points: [p0, p1] };
+    return { ...el, points: [p0, p1], startBinding, endBinding };
   });
 }
 function reorderElements(elements, selectedIds, direction) {
@@ -1217,13 +1248,13 @@ export default function Whiteboard({ board, boardList }) {
                 const startTarget = findBindTarget(prev, p0.x, p0.y, e.id);
                 if (startTarget) {
                   const bound = getBindPointWithFocus(startTarget, p1.x, p1.y);
-                  startBinding = { elementId: startTarget.id, focus: bound.focus };
+                  startBinding = { elementId: startTarget.id, focus: bound.focus, side: bound.side };
                   p0 = bound.point;
                 }
                 const endTarget = findBindTarget(prev, p1.x, p1.y, e.id);
                 if (endTarget) {
                   const bound = getBindPointWithFocus(endTarget, p0.x, p0.y);
-                  endBinding = { elementId: endTarget.id, focus: bound.focus };
+                  endBinding = { elementId: endTarget.id, focus: bound.focus, side: bound.side };
                   p1 = bound.point;
                 }
                 return { ...e, points: [p0, p1], startBinding, endBinding };
@@ -1260,7 +1291,7 @@ export default function Whiteboard({ board, boardList }) {
                 const bound = getBindPointWithFocus(target, otherPoint.x, otherPoint.y);
                 const pts = [...e.points];
                 pts[drag.handle] = bound.point;
-                return { ...e, points: pts, [bindKey]: { elementId: target.id, focus: bound.focus } };
+                return { ...e, points: pts, [bindKey]: { elementId: target.id, focus: bound.focus, side: bound.side } };
               })
             );
           }
