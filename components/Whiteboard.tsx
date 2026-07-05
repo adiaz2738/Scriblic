@@ -137,7 +137,25 @@ const EDGE_TYPES = ["rectangle", "diamond"];
 const EDGES = [{ label: "Sharp", value: "sharp" }, { label: "Round", value: "round" }];
 const ARROW_TYPES = [{ label: "Straight", value: "straight" }, { label: "Elbow", value: "elbow" }];
 
-function elbowPoints(p1, p2) {
+// startAxis/endAxis ('h' | 'v'), when known from an actual shape binding,
+// say which side of that shape the point exits/enters from — so the bend
+// matches the side that actually faces the other shape rather than being
+// re-guessed from the raw endpoint delta (which can disagree with the
+// binding near a 45-degree relative position).
+function elbowPoints(p1, p2, startAxis, endAxis) {
+  if (startAxis && endAxis) {
+    if (startAxis === endAxis) {
+      if (startAxis === "h") {
+        const midX = p1.x + (p2.x - p1.x) / 2;
+        return [p1, { x: midX, y: p1.y }, { x: midX, y: p2.y }, p2];
+      }
+      const midY = p1.y + (p2.y - p1.y) / 2;
+      return [p1, { x: p1.x, y: midY }, { x: p2.x, y: midY }, p2];
+    }
+    // Mixed orientation: a single L-bend still exits/enters each shape
+    // straight on its own facing side.
+    return startAxis === "h" ? [p1, { x: p2.x, y: p1.y }, p2] : [p1, { x: p1.x, y: p2.y }, p2];
+  }
   const midX = p1.x + (p2.x - p1.x) / 2;
   if (Math.abs(p2.x - p1.x) > Math.abs(p2.y - p1.y)) {
     return [p1, { x: midX, y: p1.y }, { x: midX, y: p2.y }, p2];
@@ -325,6 +343,16 @@ function ellipseBoundaryPoint(bbox, fromX, fromY) {
   const denom = Math.sqrt((dx * dx) / (rx * rx || 1e-6) + (dy * dy) / (ry * ry || 1e-6));
   const scale = denom === 0 ? 0 : 1 / denom;
   return { x: cx + dx * scale, y: cy + dy * scale };
+}
+// Which side ('h' = left/right, 'v' = top/bottom) of a bbox faces a given
+// point — the same dominant-axis test the focus-binding system already
+// uses to pick an attach side, reused so elbow routing agrees with it.
+function boundExitAxis(bbox, otherX, otherY) {
+  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
+  const dx = otherX - cx, dy = otherY - cy;
+  const nx = Math.abs(dx) / (bbox.w / 2 || 1e-6);
+  const ny = Math.abs(dy) / (bbox.h / 2 || 1e-6);
+  return nx >= ny ? "h" : "v";
 }
 const BIND_FOCUS_SNAP_THRESHOLD = 0.08;
 // `focus` (-1..1) records where along the attached edge a bound endpoint
@@ -514,7 +542,7 @@ function ShapeLabel({ el, hidden }) {
     </text>
   );
 }
-export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick, isSelected = false }) {
+export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick, isSelected = false, elbowStartAxis = undefined, elbowEndAxis = undefined }) {
   const { type, seed, roughness } = el;
   if (type === "rectangle") {
     const pts = [[el.x, el.y], [el.x + el.w, el.y], [el.x + el.w, el.y + el.h], [el.x, el.y + el.h]];
@@ -566,7 +594,7 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
   if (type === "line" || type === "arrow") {
     const [p1, p2] = el.points;
     const isElbow = type === "arrow" && el.arrowType === "elbow";
-    const elbowPts = isElbow ? elbowPoints(p1, p2) : null;
+    const elbowPts = isElbow ? elbowPoints(p1, p2, elbowStartAxis, elbowEndAxis) : null;
     const d = isElbow
       ? sketchyPath(elbowPts.map((p) => [p.x, p.y]), seed, roughness, false)
       : sketchyPath([[p1.x, p1.y], [p2.x, p2.y]], seed, roughness, false);
@@ -656,7 +684,7 @@ export default function Whiteboard({ board, boardList }) {
   const [canvasBg, setCanvasBg] = useState(board.canvasBg || CANVAS_BACKGROUNDS[0].value);
   const [selectedIds, setSelectedIds] = useState([]);
   const [tool, setTool] = useState("select");
-  const [style, setStyle] = useState({ stroke: STROKE_COLORS[0].value, fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, edges: "sharp", arrowType: "straight" });
+  const [style, setStyle] = useState(() => ({ stroke: defaultStrokeForBg(board.canvasBg || CANVAS_BACKGROUNDS[0].value), fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, edges: "sharp", arrowType: "straight" }));
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [marquee, setMarquee] = useState(null);
@@ -682,7 +710,7 @@ export default function Whiteboard({ board, boardList }) {
   const futureRef = useRef(future);
   const editingLabelRef = useRef(editingLabel);
   const canvasBgRef = useRef(canvasBg);
-  const lastDefaultStrokeRef = useRef(STROKE_COLORS[0].value);
+  const lastDefaultStrokeRef = useRef(defaultStrokeForBg(canvasBg));
   const panRef = useRef(pan);
   const zoomRef = useRef(zoom);
   const styleRef = useRef(style);
@@ -776,7 +804,6 @@ export default function Whiteboard({ board, boardList }) {
 
   const addProject = useCallback(
     async (name = "") => {
-      console.log("[addProject] called from", new Error().stack);
       if (creatingBoard) return null;
       setCreatingBoard(true);
       setCreateBoardError(null);
@@ -1737,13 +1764,23 @@ export default function Whiteboard({ board, boardList }) {
         <rect x="0" y="0" width="100%" height="100%" fill="url(#dotgrid)" />
 
         <g id="content-layer" transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
-          {(elements || []).map((el) =>
-            editingText && editingText.id === el.id ? null : (
+          {(elements || []).map((el) => {
+            if (editingText && editingText.id === el.id) return null;
+            let elbowStartAxis, elbowEndAxis;
+            if (el.type === "arrow" && el.arrowType === "elbow") {
+              const startTarget = el.startBinding && elements.find((e) => e.id === el.startBinding.elementId);
+              const endTarget = el.endBinding && elements.find((e) => e.id === el.endBinding.elementId);
+              const otherForStart = endTarget ? centerOf(endTarget) : el.points[1];
+              const otherForEnd = startTarget ? centerOf(startTarget) : el.points[0];
+              elbowStartAxis = startTarget ? boundExitAxis(getBBox(startTarget), otherForStart.x, otherForStart.y) : undefined;
+              elbowEndAxis = endTarget ? boundExitAxis(getBBox(endTarget), otherForEnd.x, otherForEnd.y) : undefined;
+            }
+            return (
               <g key={el.id} opacity={el.opacity} onPointerDown={(e) => handleShapePointerDown(e, el)} style={{ cursor: tool === "select" ? "move" : "inherit" }}>
-                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} onLabelDoubleClick={(target) => { if (toolRef.current === "select") startLabelEdit(target); }} isSelected={selectedIds.includes(el.id)} />
+                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} onLabelDoubleClick={(target) => { if (toolRef.current === "select") startLabelEdit(target); }} isSelected={selectedIds.includes(el.id)} elbowStartAxis={elbowStartAxis} elbowEndAxis={elbowEndAxis} />
               </g>
-            )
-          )}
+            );
+          })}
 
           {linkDraft && <rect x={linkDraft.x} y={linkDraft.y} width={linkDraft.w} height={linkDraft.h} rx={12} fill="#EEF1FF" stroke="#4C5FF7" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.5} />}
           {embedDraft && <rect x={embedDraft.x} y={embedDraft.y} width={embedDraft.w} height={embedDraft.h} rx={8} fill="none" stroke="#4C5FF7" strokeWidth={1.5} strokeDasharray="4 3" opacity={0.5} />}
