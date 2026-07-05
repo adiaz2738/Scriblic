@@ -21,5 +21,8 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  // Exclude Next.js internals and any static asset in public/ (anything
+  // with a file extension, e.g. /logo.svg) from the password gate — those
+  // need to load even on the login page itself, before auth succeeds.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|.*\\..*).*)"],
 };

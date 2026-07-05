@@ -114,8 +114,11 @@ export default function Dashboard({ initialBoards, dbError }: { initialBoards: a
     <div style={{ minHeight: "100vh", background: theme.appBg, fontFamily: "'Inter', -apple-system, sans-serif" }} onClick={() => setConfirmDeleteId(null)}>
       <div style={{ maxWidth: 880, margin: "0 auto", padding: "56px 24px" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, letterSpacing: "0.14em", textTransform: "uppercase", color: theme.muted }}>
-            Scriblic
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <img src="/logo.svg" alt="Scriblic" width={20} height={20} style={{ display: "block" }} />
+            <span style={{ fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 15, color: theme.ink, letterSpacing: "-0.01em" }}>
+              criblic
+            </span>
           </div>
           <button
             onClick={toggleTheme}
