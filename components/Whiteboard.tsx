@@ -102,9 +102,9 @@ const STROKE_WIDTHS = [
 
 const FONT_SIZES = [
   { label: "S", value: 16 },
-  { label: "M", value: 20 },
-  { label: "L", value: 28 },
-  { label: "XL", value: 36 },
+  { label: "M", value: 24 },
+  { label: "L", value: 36 },
+  { label: "XL", value: 52 },
 ];
 
 const ROUGHNESS = [
@@ -1566,6 +1566,24 @@ export default function Whiteboard({ board, boardList }) {
           const pts = [...drag.originPoints];
           pts[drag.handle] = { x, y };
           patch = { points: pts };
+        } else if (activeEl && activeEl.type === "text") {
+          const o = drag.origin;
+          const h = drag.handle;
+          const affectsX = h.includes("e") || h.includes("w");
+          const affectsY = h.includes("n") || h.includes("s");
+          const rawW = affectsX ? (h.includes("e") ? x - o.x : o.x + o.w - x) : o.w;
+          const rawH = affectsY ? (h.includes("s") ? y - o.y : o.y + o.h - y) : o.h;
+          // Text scales as a whole (font size), not independently in x/y —
+          // pick whichever axis is actually being dragged to derive the
+          // scale factor; corner handles average both.
+          const scaleX = affectsX ? rawW / o.w : null;
+          const scaleY = affectsY ? rawH / o.h : null;
+          const scale = scaleX !== null && scaleY !== null ? (scaleX + scaleY) / 2 : scaleX !== null ? scaleX : scaleY;
+          const nextFontSize = Math.min(400, Math.max(8, drag.originFontSize * scale));
+          const { width: nw, height: nh } = measureText(activeEl.text, nextFontSize);
+          const nx = h.includes("w") ? o.x + o.w - nw : o.x;
+          const ny = h.includes("n") ? o.y + o.h - nh : o.y;
+          patch = { x: nx, y: ny, width: nw, height: nh, fontSize: nextFontSize };
         } else if (activeEl) {
           const o = drag.origin;
           const h = drag.handle;
@@ -1865,6 +1883,14 @@ export default function Whiteboard({ board, boardList }) {
           // object handle id (see handlePositions) and must never rebind.
           arrowEndpointResize: el.type === "arrow" && typeof handle === "number",
         });
+      } else if (el.type === "text") {
+        beginDrag({
+          mode: "resize",
+          id: el.id,
+          handle,
+          origin: { x: el.x, y: el.y, w: el.width || 40, h: el.height || 30 },
+          originFontSize: el.fontSize,
+        });
       } else {
         beginDrag({ mode: "resize", id: el.id, handle, origin: { x: el.x, y: el.y, w: el.w, h: el.h } });
       }
@@ -1873,14 +1899,19 @@ export default function Whiteboard({ board, boardList }) {
   );
 
   const zoomAtPoint = useCallback((screenX, screenY, nextZoomFn) => {
-    setZoom((z) => {
-      const nz = Math.min(4, Math.max(0.1, nextZoomFn(z)));
-      setPan((p) => ({
-        x: screenX - ((screenX - p.x) / z) * nz,
-        y: screenY - ((screenY - p.y) / z) * nz,
-      }));
-      return nz;
-    });
+    // Read current zoom/pan synchronously via refs and commit both as plain
+    // top-level setState calls (not nested inside each other's functional
+    // updater) — React 18 Strict Mode double-invokes nested updaters in dev,
+    // which was compounding the pan adjustment and making zoom drift/reverse.
+    const z = zoomRef.current;
+    const p = panRef.current;
+    const nz = Math.min(4, Math.max(0.1, nextZoomFn(z)));
+    const np = {
+      x: screenX - ((screenX - p.x) / z) * nz,
+      y: screenY - ((screenY - p.y) / z) * nz,
+    };
+    setZoom(nz);
+    setPan(np);
   }, []);
 
   /* ---------- laser trail fade ---------- */
@@ -2188,7 +2219,7 @@ export default function Whiteboard({ board, boardList }) {
   const handlePositions = useMemo(() => {
     if (!singleSelected) return [];
     if (singleSelected.locked) return [];
-    if (singleSelected.type === "text" || singleSelected.type === "link") return [];
+    if (singleSelected.type === "link") return [];
     if (singleSelected.type === "line" || singleSelected.type === "arrow") {
       const endpointHandles = singleSelected.points.map((p, i) => ({ key: `pt-${i}`, handle: i, wx: p.x, wy: p.y }));
       // One draggable dot per INTERIOR segment midpoint (both ends are bend
@@ -2675,6 +2706,27 @@ export default function Whiteboard({ board, boardList }) {
                       setElements((prev) => prev.map((el) => (selectedIdsRef.current.includes(el.id) && el.type === "text" ? { ...el, fontSize: f.value, ...measureText(el.text, f.value) } : el)));
                       endChange();
                     }
+                  }}>{f.label}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {singleSelected && ["rectangle", "diamond", "ellipse"].includes(singleSelected.type) && singleSelected.label && (
+            <div>
+              <div className="panel-label">Label size</div>
+              <div style={{ display: "flex", gap: 4 }}>
+                {FONT_SIZES.map((f) => (
+                  <button key={f.value} className={`seg-btn${(singleSelected.labelFontSize || 16) === f.value ? " on" : ""}`} onClick={() => {
+                    beginChange();
+                    setElements((prev) =>
+                      prev.map((el) => {
+                        if (el.id !== singleSelected.id) return el;
+                        const grown = growBoxForLabel({ x: el.x, y: el.y, w: el.w, h: el.h }, el.label, f.value);
+                        return { ...el, labelFontSize: f.value, x: grown.x, y: grown.y, w: grown.w, h: grown.h };
+                      })
+                    );
+                    endChange();
                   }}>{f.label}</button>
                 ))}
               </div>
