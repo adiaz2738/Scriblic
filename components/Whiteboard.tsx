@@ -712,6 +712,25 @@ function updateBoundArrows(elements, updatedIds) {
       const obstacles = collectElbowObstacles(elements, el);
       const route = computeElbowRoute(p0, p1, startAxis, endAxis, obstacles);
       elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
+    } else if (el.arrowType === "elbow" && elbowWaypoints && elbowWaypoints.length > 0) {
+      // Manually-routed: the endpoint(s) above just got recomputed to track
+      // the moved shape, but the interior waypoints are otherwise left
+      // untouched — re-anchor only the waypoint adjacent to whichever
+      // endpoint moved, preserving the exit segment's orthogonality, so the
+      // route stays visually continuous instead of leaving a gap.
+      const oldP0 = el.points[0], oldP1 = el.points[1];
+      const wps = elbowWaypoints.map((p) => ({ ...p }));
+      if (startBoundUpdated) {
+        const w0 = wps[0];
+        if (oldP0.y === w0.y) w0.y = p0.y;
+        else if (oldP0.x === w0.x) w0.x = p0.x;
+      }
+      if (endBoundUpdated) {
+        const wLast = wps[wps.length - 1];
+        if (oldP1.y === wLast.y) wLast.y = p1.y;
+        else if (oldP1.x === wLast.x) wLast.x = p1.x;
+      }
+      elbowWaypoints = wps;
     }
     return { ...el, points: [p0, p1], startBinding, endBinding, elbowWaypoints };
   });
@@ -739,6 +758,27 @@ function rerouteAllElbowArrows(elements) {
     const route = computeElbowRoute(p0, p1, startAxis, endAxis, obstacles);
     const elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
     return { ...el, elbowWaypoints };
+  });
+}
+// Deleting a bound shape used to leave surviving arrows pointing at a
+// nonexistent elementId — rerouteAllElbowArrows would then compute an
+// undefined exit axis while the stale binding (and its indicator circle)
+// stayed rendered forever. Null out any binding whose target is gone, and
+// freeze the elbow route as-is (manuallyRouted) so it isn't silently
+// reshaped by the fallback router right as the user watches the deletion.
+function clearDanglingBindings(elements) {
+  const ids = new Set(elements.map((el) => el.id));
+  return elements.map((el) => {
+    if (el.type !== "arrow" || (!el.startBinding && !el.endBinding)) return el;
+    const startDangling = el.startBinding && !ids.has(el.startBinding.elementId);
+    const endDangling = el.endBinding && !ids.has(el.endBinding.elementId);
+    if (!startDangling && !endDangling) return el;
+    return {
+      ...el,
+      startBinding: startDangling ? null : el.startBinding,
+      endBinding: endDangling ? null : el.endBinding,
+      manuallyRouted: el.arrowType === "elbow" ? true : el.manuallyRouted,
+    };
   });
 }
 function reorderElements(elements, selectedIds, direction) {
@@ -1310,7 +1350,10 @@ export default function Whiteboard({ board, boardList }) {
   const deleteSelected = useCallback(() => {
     if (selectedIdsRef.current.length === 0) return;
     beginChange();
-    setElements((prev) => rerouteAllElbowArrows(prev.filter((el) => !selectedIdsRef.current.includes(el.id))));
+    setElements((prev) => {
+      const survivors = clearDanglingBindings(prev.filter((el) => !selectedIdsRef.current.includes(el.id)));
+      return rerouteAllElbowArrows(survivors);
+    });
     setSelectedIds([]);
     endChange();
   }, [beginChange, endChange]);
@@ -1326,15 +1369,26 @@ export default function Whiteboard({ board, boardList }) {
     if (selectedIdsRef.current.length === 0) return;
     beginChange();
     const offset = 16;
-    const dupes = elementsRef.current
-      .filter((el) => selectedIdsRef.current.includes(el.id))
-      .map((el) => {
-        const clone = { ...el, id: genId() };
-        if (clone.points) clone.points = clone.points.map((p) => ({ x: p.x + offset, y: p.y + offset }));
-        if (clone.elbowWaypoints) clone.elbowWaypoints = clone.elbowWaypoints.map((p) => ({ x: p.x + offset, y: p.y + offset }));
-        if (clone.x !== undefined) { clone.x += offset; clone.y += offset; }
-        return clone;
-      });
+    const originals = elementsRef.current.filter((el) => selectedIdsRef.current.includes(el.id));
+    const idMap = new Map(originals.map((el) => [el.id, genId()]));
+    const dupes = originals.map((el) => {
+      const clone = { ...el, id: idMap.get(el.id) };
+      if (clone.points) clone.points = clone.points.map((p) => ({ x: p.x + offset, y: p.y + offset }));
+      if (clone.elbowWaypoints) clone.elbowWaypoints = clone.elbowWaypoints.map((p) => ({ x: p.x + offset, y: p.y + offset }));
+      if (clone.x !== undefined) { clone.x += offset; clone.y += offset; }
+      // Only remap a binding to the duplicated shape's clone id if that
+      // shape was part of the same duplicated batch — duplicating just the
+      // arrow alone should keep tracking the original source shape.
+      if (clone.type === "arrow") {
+        if (clone.startBinding && idMap.has(clone.startBinding.elementId)) {
+          clone.startBinding = { ...clone.startBinding, elementId: idMap.get(clone.startBinding.elementId) };
+        }
+        if (clone.endBinding && idMap.has(clone.endBinding.elementId)) {
+          clone.endBinding = { ...clone.endBinding, elementId: idMap.get(clone.endBinding.elementId) };
+        }
+      }
+      return clone;
+    });
     setElements((prev) => [...prev, ...dupes]);
     setSelectedIds(dupes.map((d) => d.id));
     endChange();
@@ -1562,6 +1616,36 @@ export default function Whiteboard({ board, boardList }) {
             wps[i + 1] = { ...b, x };
           }
           patch = { elbowWaypoints: wps };
+        } else if (activeEl && activeEl.type === "arrow" && activeEl.arrowType === "elbow" && typeof drag.handle === "object" && (drag.handle.kind === "segment-start" || drag.handle.kind === "segment-end")) {
+          // Grab the segment right next to a bound endpoint — the endpoint
+          // itself must stay fixed (attached to its shape), so this inserts
+          // a new bend point near it instead of moving the endpoint.
+          const origWps = drag.originWaypoints;
+          const [origP0, origP1] = drag.originPoints;
+          if (origWps.length === 0) {
+            // Straight elbow arrow, both endpoints fixed — a single new bend
+            // can't stay orthogonal on both sides, so pull out a full
+            // rectangular detour (two new points) instead.
+            const horizontal = origP0.y === origP1.y;
+            const n1 = horizontal ? { x: origP0.x, y } : { x, y: origP0.y };
+            const n2 = horizontal ? { x: origP1.x, y } : { x, y: origP1.y };
+            patch = { elbowWaypoints: [n1, n2] };
+          } else if (drag.handle.kind === "segment-start") {
+            const w0 = origWps[0];
+            const horizontal = origP0.y === w0.y;
+            const nNew = horizontal ? { x: origP0.x, y } : { x, y: origP0.y };
+            const wps = origWps.map((p) => ({ ...p }));
+            if (horizontal) wps[0] = { ...wps[0], y }; else wps[0] = { ...wps[0], x };
+            patch = { elbowWaypoints: [nNew, ...wps] };
+          } else {
+            const wLast = origWps[origWps.length - 1];
+            const horizontal = origP1.y === wLast.y;
+            const nNew = horizontal ? { x: origP1.x, y } : { x, y: origP1.y };
+            const wps = origWps.map((p) => ({ ...p }));
+            const li = wps.length - 1;
+            if (horizontal) wps[li] = { ...wps[li], y }; else wps[li] = { ...wps[li], x };
+            patch = { elbowWaypoints: [...wps, nNew] };
+          }
         } else if (activeEl && (activeEl.type === "line" || activeEl.type === "arrow")) {
           const pts = [...drag.originPoints];
           pts[drag.handle] = { x, y };
@@ -1717,7 +1801,18 @@ export default function Whiteboard({ board, boardList }) {
             const point = el.points[drag.handle];
             const bindKey = drag.handle === 0 ? "startBinding" : "endBinding";
             const otherPoint = el.points[drag.handle === 0 ? 1 : 0];
-            const target = findBindTarget(elementsRef.current, point.x, point.y, el.id, 10 / zoomRef.current);
+            let target = findBindTarget(elementsRef.current, point.x, point.y, el.id, 10 / zoomRef.current);
+            if (!target && drag.originBinding) {
+              // Released just outside the shape's normal hit zone — retry
+              // wider before giving up, since this was bound a moment ago.
+              target = findBindTarget(elementsRef.current, point.x, point.y, el.id, 25 / zoomRef.current);
+            }
+            if (!target && drag.originBinding) {
+              // Still nothing nearby: keep the previous binding rather than
+              // silently detaching (unless that shape itself was deleted).
+              const prevTarget = elementsRef.current.find((e2) => e2.id === drag.originBinding.elementId);
+              if (prevTarget) target = prevTarget;
+            }
             setElements((prev) =>
               prev.map((e) => {
                 if (e.id !== el.id) return e;
@@ -1747,7 +1842,7 @@ export default function Whiteboard({ board, boardList }) {
             );
           }
           setHoverBindTargetId(null);
-        } else if (drag.mode === "resize" && typeof drag.handle === "object" && drag.handle.kind === "segment") {
+        } else if (drag.mode === "resize" && typeof drag.handle === "object" && (drag.handle.kind === "segment" || drag.handle.kind === "segment-start" || drag.handle.kind === "segment-end")) {
           // Live elbowWaypoints patch from the move-handler already has the
           // dragged position — this just marks the route as user-authored so
           // auto-routing (updateBoundArrows) won't overwrite it later.
@@ -1882,6 +1977,7 @@ export default function Whiteboard({ board, boardList }) {
           // start/end rebinding path on pointer-up — waypoint handles use an
           // object handle id (see handlePositions) and must never rebind.
           arrowEndpointResize: el.type === "arrow" && typeof handle === "number",
+          originBinding: typeof handle === "number" ? (handle === 0 ? el.startBinding : el.endBinding) : null,
         });
       } else if (el.type === "text") {
         beginDrag({
@@ -2222,16 +2318,28 @@ export default function Whiteboard({ board, boardList }) {
     if (singleSelected.type === "link") return [];
     if (singleSelected.type === "line" || singleSelected.type === "arrow") {
       const endpointHandles = singleSelected.points.map((p, i) => ({ key: `pt-${i}`, handle: i, wx: p.x, wy: p.y }));
-      // One draggable dot per INTERIOR segment midpoint (both ends are bend
-      // points, not the shape-attached start/end) — matches Excalidraw's
-      // elbow arrows, where you grab the middle of a segment and slide the
-      // whole straight run sideways, rather than dragging individual corners.
+      // One draggable dot per segment midpoint of the full elbow polyline —
+      // interior waypoint-to-waypoint segments slide sideways (matches
+      // Excalidraw's mid-segment drag); the two END segments (touching the
+      // bound endpoints) instead pull out a NEW bend near the shape while
+      // the endpoint itself stays attached — also matching Excalidraw.
       const segmentHandles =
-        singleSelected.type === "arrow" && singleSelected.arrowType === "elbow" && singleSelected.elbowWaypoints && singleSelected.elbowWaypoints.length > 1
-          ? singleSelected.elbowWaypoints.slice(0, -1).map((a, i) => {
-              const b = singleSelected.elbowWaypoints[i + 1];
-              return { key: `seg-${i}`, handle: { kind: "segment", index: i }, wx: (a.x + b.x) / 2, wy: (a.y + b.y) / 2 };
-            })
+        singleSelected.type === "arrow" && singleSelected.arrowType === "elbow"
+          ? (() => {
+              const wps = singleSelected.elbowWaypoints || [];
+              const fullPts = [singleSelected.points[0], ...wps, singleSelected.points[1]];
+              if (fullPts.length < 2) return [];
+              const segCount = fullPts.length - 1;
+              return fullPts.slice(0, -1).map((a, i) => {
+                const b = fullPts[i + 1];
+                const kind = i === 0 ? "segment-start" : i === segCount - 1 ? "segment-end" : "segment";
+                // For the unchanged interior "segment" case, index must map
+                // into elbowWaypoints pairs (i-1, i), matching the existing
+                // resize-move logic below.
+                const handle = kind === "segment" ? { kind, index: i - 1 } : { kind };
+                return { key: `seg-${i}`, handle, wx: (a.x + b.x) / 2, wy: (a.y + b.y) / 2 };
+              });
+            })()
           : [];
       return [...endpointHandles, ...segmentHandles];
     }
