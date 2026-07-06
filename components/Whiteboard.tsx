@@ -164,6 +164,176 @@ function elbowPoints(p1, p2, startAxis, endAxis) {
   const midY = p1.y + (p2.y - p1.y) / 2;
   return [p1, { x: p1.x, y: midY }, { x: p2.x, y: midY }, p2];
 }
+// Axis-aligned segment vs. rect overlap test — used by the elbow router to
+// check whether a candidate grid edge would cut through an obstacle. Segments
+// here are always horizontal or vertical (orthogonal routing only), so this
+// is a simple per-axis range check rather than a general clip test.
+function segmentIntersectsRect(x1, y1, x2, y2, rect) {
+  const rx1 = rect.x, ry1 = rect.y, rx2 = rect.x + rect.w, ry2 = rect.y + rect.h;
+  if (y1 === y2) {
+    if (y1 <= ry1 || y1 >= ry2) return false;
+    const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+    return maxX > rx1 && minX < rx2;
+  }
+  if (x1 === x2) {
+    if (x1 <= rx1 || x1 >= rx2) return false;
+    const minY = Math.min(y1, y2), maxY = Math.max(y1, y2);
+    return maxY > ry1 && minY < ry2;
+  }
+  const segBox = { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+  return rectsIntersect(segBox, rect);
+}
+// Collects the obstacle bboxes an elbow arrow's route should avoid: every
+// bindable shape (rectangle/diamond/ellipse/image/embed/link) except the
+// arrow itself and whatever it's actually bound to at each end, restricted to
+// shapes near the endpoints (checked by the caller via computeElbowRoute's
+// own bounding-rect filter) so the routing grid stays small regardless of
+// total board size.
+function collectElbowObstacles(elements, arrowEl) {
+  const excludeIds = new Set([arrowEl.id]);
+  if (arrowEl.startBinding) excludeIds.add(arrowEl.startBinding.elementId);
+  if (arrowEl.endBinding) excludeIds.add(arrowEl.endBinding.elementId);
+  return elements
+    .filter((el) => !excludeIds.has(el.id) && BINDABLE_TYPES.includes(el.type))
+    .map((el) => getBBox(el));
+}
+// Grid-based orthogonal pathfinder: routes an elbow arrow from p1 to p2
+// around any obstacle bboxes sitting between them, instead of the naive
+// straight L/Z bend from elbowPoints (which has no obstacle awareness at
+// all). Builds a sparse grid from the endpoints' and each nearby obstacle's
+// padded edges, then runs a minimize-turns-then-length shortest path search
+// (Dijkstra over (node, incoming-direction) states) so the result prefers
+// the fewest bends, like Excalidraw's elbow routing. Falls back to the cheap
+// elbowPoints() when there are no relevant obstacles or the search fails.
+function computeElbowRoute(p1, p2, startAxis, endAxis, obstacles) {
+  const fallback = () => elbowPoints(p1, p2, startAxis, endAxis);
+  if (!obstacles || obstacles.length === 0) return fallback();
+
+  const PAD = 12;
+  const MARGIN = 30;
+  const boundsBox = {
+    x: Math.min(p1.x, p2.x) - MARGIN,
+    y: Math.min(p1.y, p2.y) - MARGIN,
+    w: Math.abs(p2.x - p1.x) + MARGIN * 2,
+    h: Math.abs(p2.y - p1.y) + MARGIN * 2,
+  };
+  const relevant = obstacles.filter((o) => rectsIntersect(o, boundsBox));
+  if (relevant.length === 0) return fallback();
+
+  const padded = relevant.map((o) => ({ x: o.x - PAD, y: o.y - PAD, w: o.w + PAD * 2, h: o.h + PAD * 2 }));
+  const insideAnyObstacle = (x, y) => padded.some((o) => x > o.x && x < o.x + o.w && y > o.y && y < o.y + o.h);
+  const segBlocked = (ax, ay, bx, by) => padded.some((o) => segmentIntersectsRect(ax, ay, bx, by, o));
+
+  const xsSet = new Set([p1.x, p2.x]);
+  const ysSet = new Set([p1.y, p2.y]);
+  for (const o of padded) {
+    xsSet.add(o.x); xsSet.add(o.x + o.w);
+    ysSet.add(o.y); ysSet.add(o.y + o.h);
+  }
+  const xs = [...xsSet].sort((a, b) => a - b);
+  const ys = [...ysSet].sort((a, b) => a - b);
+
+  const nodes = [];
+  const nodeIndex = new Map();
+  for (const x of xs) {
+    for (const y of ys) {
+      if (insideAnyObstacle(x, y)) continue;
+      nodeIndex.set(`${x},${y}`, nodes.length);
+      nodes.push({ x, y });
+    }
+  }
+  const startIdx = nodeIndex.get(`${p1.x},${p1.y}`);
+  const endIdx = nodeIndex.get(`${p2.x},${p2.y}`);
+  if (startIdx === undefined || endIdx === undefined) return fallback();
+
+  const byX = new Map(), byY = new Map();
+  nodes.forEach((n, i) => {
+    if (!byX.has(n.x)) byX.set(n.x, []);
+    byX.get(n.x).push({ y: n.y, idx: i });
+    if (!byY.has(n.y)) byY.set(n.y, []);
+    byY.get(n.y).push({ x: n.x, idx: i });
+  });
+  byX.forEach((list) => list.sort((a, b) => a.y - b.y));
+  byY.forEach((list) => list.sort((a, b) => a.x - b.x));
+
+  const adj = nodes.map(() => []);
+  byX.forEach((list) => {
+    for (let i = 0; i < list.length - 1; i++) {
+      const a = list[i], b = list[i + 1];
+      const na = nodes[a.idx], nb = nodes[b.idx];
+      if (!segBlocked(na.x, na.y, nb.x, nb.y)) {
+        adj[a.idx].push({ to: b.idx, dir: "v" });
+        adj[b.idx].push({ to: a.idx, dir: "v" });
+      }
+    }
+  });
+  byY.forEach((list) => {
+    for (let i = 0; i < list.length - 1; i++) {
+      const a = list[i], b = list[i + 1];
+      const na = nodes[a.idx], nb = nodes[b.idx];
+      if (!segBlocked(na.x, na.y, nb.x, nb.y)) {
+        adj[a.idx].push({ to: b.idx, dir: "h" });
+        adj[b.idx].push({ to: a.idx, dir: "h" });
+      }
+    }
+  });
+
+  const BEND_PENALTY = 75;
+  const startDir = startAxis === "h" ? "h" : startAxis === "v" ? "v" : "none";
+  const endDirRequired = endAxis === "h" ? "h" : endAxis === "v" ? "v" : null;
+  const stateKey = (idx, dir) => `${idx}|${dir}`;
+
+  const dist = new Map([[stateKey(startIdx, startDir), 0]]);
+  const prevMap = new Map();
+  const queue = [{ idx: startIdx, dir: startDir, cost: 0 }];
+  let finalState = null;
+
+  while (queue.length) {
+    let mi = 0;
+    for (let i = 1; i < queue.length; i++) if (queue[i].cost < queue[mi].cost) mi = i;
+    const cur = queue.splice(mi, 1)[0];
+    const curKey = stateKey(cur.idx, cur.dir);
+    if (dist.get(curKey) < cur.cost) continue;
+    if (cur.idx === endIdx && (!endDirRequired || cur.dir === endDirRequired || cur.dir === "none")) {
+      finalState = cur;
+      break;
+    }
+    for (const edge of adj[cur.idx]) {
+      const a = nodes[cur.idx], b = nodes[edge.to];
+      const length = Math.hypot(b.x - a.x, b.y - a.y);
+      const bend = cur.dir !== "none" && cur.dir !== edge.dir ? BEND_PENALTY : 0;
+      const newCost = cur.cost + length + bend;
+      const key = stateKey(edge.to, edge.dir);
+      if (!dist.has(key) || newCost < dist.get(key)) {
+        dist.set(key, newCost);
+        prevMap.set(key, curKey);
+        queue.push({ idx: edge.to, dir: edge.dir, cost: newCost });
+      }
+    }
+  }
+  if (!finalState) return fallback();
+
+  const pathKeys = [stateKey(finalState.idx, finalState.dir)];
+  while (prevMap.has(pathKeys[pathKeys.length - 1])) {
+    pathKeys.push(prevMap.get(pathKeys[pathKeys.length - 1]));
+  }
+  pathKeys.reverse();
+  const rawPoints = pathKeys.map((k) => nodes[parseInt(k.split("|")[0], 10)]);
+
+  // Collapse consecutive collinear points into a single bend.
+  const collapsed = [];
+  for (const pt of rawPoints) {
+    if (collapsed.length >= 2) {
+      const a = collapsed[collapsed.length - 2], b = collapsed[collapsed.length - 1];
+      if ((a.x === b.x && b.x === pt.x) || (a.y === b.y && b.y === pt.y)) {
+        collapsed[collapsed.length - 1] = pt;
+        continue;
+      }
+    }
+    collapsed.push(pt);
+  }
+  return collapsed;
+}
 
 function relativeLuminance(hex) {
   const c = hex.replace("#", "");
@@ -284,8 +454,9 @@ export function getBBox(el) {
   if (el.type === "text") return { x: el.x, y: el.y, w: el.width || 40, h: el.height || 30 };
   if (BOX_TYPES.includes(el.type)) return { x: el.x, y: el.y, w: el.w || 40, h: el.h || 30 };
   if (el.type === "line" || el.type === "arrow" || el.type === "freehand") {
-    const xs = el.points.map((p) => p.x);
-    const ys = el.points.map((p) => p.y);
+    const allPoints = el.elbowWaypoints && el.elbowWaypoints.length ? [...el.points, ...el.elbowWaypoints] : el.points;
+    const xs = allPoints.map((p) => p.x);
+    const ys = allPoints.map((p) => p.y);
     return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
   }
   return { x: 0, y: 0, w: 0, h: 0 };
@@ -346,7 +517,11 @@ function hitTestPoint(el, x, y, threshold) {
   }
   if (el.type === "line" || el.type === "arrow") {
     const [p1, p2] = el.points;
-    return distToSegment(x, y, p1.x, p1.y, p2.x, p2.y) <= threshold;
+    const pts = el.elbowWaypoints && el.elbowWaypoints.length ? [p1, ...el.elbowWaypoints, p2] : [p1, p2];
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (distToSegment(x, y, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y) <= threshold) return true;
+    }
+    return false;
   }
   if (el.type === "freehand") {
     for (let i = 0; i < el.points.length - 1; i++) {
@@ -526,7 +701,44 @@ function updateBoundArrows(elements, updatedIds) {
         endBinding = result.binding;
       }
     }
-    return { ...el, points: [p0, p1], startBinding, endBinding };
+    let elbowWaypoints = el.elbowWaypoints;
+    if (el.arrowType === "elbow" && el.manuallyRouted !== true) {
+      const startTarget = startBinding && byId.get(startBinding.elementId);
+      const endTarget = endBinding && byId.get(endBinding.elementId);
+      const otherForStart = endTarget ? centerOf(endTarget) : p1;
+      const otherForEnd = startTarget ? centerOf(startTarget) : p0;
+      const startAxis = startTarget ? boundExitAxis(getBBox(startTarget), otherForStart.x, otherForStart.y) : undefined;
+      const endAxis = endTarget ? boundExitAxis(getBBox(endTarget), otherForEnd.x, otherForEnd.y) : undefined;
+      const obstacles = collectElbowObstacles(elements, el);
+      const route = computeElbowRoute(p0, p1, startAxis, endAxis, obstacles);
+      elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
+    }
+    return { ...el, points: [p0, p1], startBinding, endBinding, elbowWaypoints };
+  });
+}
+// updateBoundArrows only re-routes an elbow arrow when one of ITS OWN bound
+// shapes is in the moved/updated set — so an unrelated third shape moving
+// into (or out of) the space between two already-connected shapes never
+// triggers a re-route, leaving the arrow cutting through the new obstacle
+// forever. This re-checks every non-manually-routed elbow arrow on the
+// board against the current obstacle layout, regardless of what moved.
+// Called once at drag/creation finalize (not on every pointermove frame)
+// to keep live dragging smooth.
+function rerouteAllElbowArrows(elements) {
+  const byId = new Map(elements.map((el) => [el.id, el]));
+  return elements.map((el) => {
+    if (el.type !== "arrow" || el.arrowType !== "elbow" || el.manuallyRouted === true) return el;
+    const [p0, p1] = el.points;
+    const startTarget = el.startBinding && byId.get(el.startBinding.elementId);
+    const endTarget = el.endBinding && byId.get(el.endBinding.elementId);
+    const otherForStart = endTarget ? centerOf(endTarget) : p1;
+    const otherForEnd = startTarget ? centerOf(startTarget) : p0;
+    const startAxis = startTarget ? boundExitAxis(getBBox(startTarget), otherForStart.x, otherForStart.y) : undefined;
+    const endAxis = endTarget ? boundExitAxis(getBBox(endTarget), otherForEnd.x, otherForEnd.y) : undefined;
+    const obstacles = collectElbowObstacles(elements, el);
+    const route = computeElbowRoute(p0, p1, startAxis, endAxis, obstacles);
+    const elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
+    return { ...el, elbowWaypoints };
   });
 }
 function reorderElements(elements, selectedIds, direction) {
@@ -569,7 +781,7 @@ function growBoxForLabel(box, text, fontSize) {
 function createShapeElement(type, x, y, style) {
   const base = { id: genId(), type, stroke: style.stroke, fill: style.fill, strokeWidth: style.strokeWidth, roughness: style.roughness, opacity: style.opacity, seed: Math.floor(Math.random() * 100000) + 1 };
   if (type === "rectangle" || type === "diamond" || type === "ellipse") return { ...base, x, y, w: 0, h: 0, edges: style.edges };
-  if (type === "arrow") return { ...base, points: [{ x, y }, { x, y }], arrowType: style.arrowType };
+  if (type === "arrow") return { ...base, points: [{ x, y }, { x, y }], arrowType: style.arrowType, elbowWaypoints: null, manuallyRouted: false };
   if (type === "line") return { ...base, points: [{ x, y }, { x, y }] };
   if (type === "freehand") return { ...base, points: [{ x, y }] };
   return base;
@@ -638,7 +850,12 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent" && !isSelected) e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        {el.fill === "transparent" && !isSelected && (
+          <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="none" stroke="transparent" strokeWidth={16} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "stroke", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        )}
+        {(el.fill !== "transparent" || isSelected) && (
+          <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        )}
         {el.fill !== "transparent" && (
           radius > 0
             ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
@@ -655,7 +872,12 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent" && !isSelected) e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        {el.fill === "transparent" && !isSelected && (
+          <polygon points={pts.map((p) => p.join(",")).join(" ")} fill="none" stroke="transparent" strokeWidth={16} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "stroke", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        )}
+        {(el.fill !== "transparent" || isSelected) && (
+          <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        )}
         {el.fill !== "transparent" && (
           radius > 0
             ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
@@ -672,7 +894,12 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="transparent" style={{ pointerEvents: "all" }} onPointerDown={(e) => { if (el.fill === "transparent" && !isSelected) e.stopPropagation(); }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        {el.fill === "transparent" && !isSelected && (
+          <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="none" stroke="transparent" strokeWidth={16} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "stroke", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        )}
+        {(el.fill !== "transparent" || isSelected) && (
+          <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        )}
         {el.fill !== "transparent" && <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill={el.fill} stroke="none" />}
         <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
         <ShapeLabel el={el} hidden={hideLabel} />
@@ -682,7 +909,9 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
   if (type === "line" || type === "arrow") {
     const [p1, p2] = el.points;
     const isElbow = type === "arrow" && el.arrowType === "elbow";
-    const elbowPts = isElbow ? elbowPoints(p1, p2, elbowStartAxis, elbowEndAxis) : null;
+    const elbowPts = isElbow
+      ? (el.elbowWaypoints && el.elbowWaypoints.length ? [p1, ...el.elbowWaypoints, p2] : elbowPoints(p1, p2, elbowStartAxis, elbowEndAxis))
+      : null;
     const d = isElbow
       ? sketchyPath(elbowPts.map((p) => [p.x, p.y]), seed, roughness, false)
       : sketchyPath([[p1.x, p1.y], [p2.x, p2.y]], seed, roughness, false);
@@ -800,6 +1029,7 @@ export default function Whiteboard({ board, boardList }) {
   const pastRef = useRef(past);
   const futureRef = useRef(future);
   const editingLabelRef = useRef(editingLabel);
+  const editingTextRef = useRef(null);
   const canvasBgRef = useRef(canvasBg);
   const lastDefaultStrokeRef = useRef(defaultStrokeForBg(canvasBg));
   const panRef = useRef(pan);
@@ -820,6 +1050,7 @@ export default function Whiteboard({ board, boardList }) {
   useEffect(() => { pastRef.current = past; }, [past]);
   useEffect(() => { futureRef.current = future; }, [future]);
   useEffect(() => { editingLabelRef.current = editingLabel; }, [editingLabel]);
+  useEffect(() => { editingTextRef.current = editingText; }, [editingText]);
   useEffect(() => { canvasBgRef.current = canvasBg; }, [canvasBg]);
   useEffect(() => { panRef.current = pan; }, [pan]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
@@ -833,13 +1064,6 @@ export default function Whiteboard({ board, boardList }) {
     const savedGrid = typeof window !== "undefined" ? window.localStorage.getItem("board-grid") : null;
     if (savedGrid === "true") setShowGrid(true);
   }, []);
-
-  useEffect(() => {
-    if (editingText && textareaRef.current) {
-      textareaRef.current.focus();
-      textareaRef.current.select();
-    }
-  }, [editingText?.id]);
 
   useEffect(() => {
     if (editingLabel && labelTextareaRef.current) {
@@ -1012,10 +1236,13 @@ export default function Whiteboard({ board, boardList }) {
       setPast((p) => [...p.slice(-49), snapshotRef.current]);
       setFuture([]);
     }
-    setElements((current) => {
-      snapshotRef.current = JSON.parse(JSON.stringify(current));
-      return current; // no structural change — just reading the true current value synchronously
-    });
+    // Read straight from the ref (kept in sync via its own effect) rather than
+    // through a setElements updater — a functional updater used purely to read
+    // a value, with a side effect in its body, is exactly the impure-updater
+    // pattern React 18 Strict Mode double-invokes in dev to catch; nesting a
+    // call like this inside ANOTHER updater (as finishTextEdit once did) made
+    // that double-invocation double-push history entries.
+    snapshotRef.current = JSON.parse(JSON.stringify(elementsRef.current));
   }, []);
   const endChange = useCallback(() => {
     if (snapshotRef.current !== null) {
@@ -1083,7 +1310,7 @@ export default function Whiteboard({ board, boardList }) {
   const deleteSelected = useCallback(() => {
     if (selectedIdsRef.current.length === 0) return;
     beginChange();
-    setElements((prev) => prev.filter((el) => !selectedIdsRef.current.includes(el.id)));
+    setElements((prev) => rerouteAllElbowArrows(prev.filter((el) => !selectedIdsRef.current.includes(el.id))));
     setSelectedIds([]);
     endChange();
   }, [beginChange, endChange]);
@@ -1104,6 +1331,7 @@ export default function Whiteboard({ board, boardList }) {
       .map((el) => {
         const clone = { ...el, id: genId() };
         if (clone.points) clone.points = clone.points.map((p) => ({ x: p.x + offset, y: p.y + offset }));
+        if (clone.elbowWaypoints) clone.elbowWaypoints = clone.elbowWaypoints.map((p) => ({ x: p.x + offset, y: p.y + offset }));
         if (clone.x !== undefined) { clone.x += offset; clone.y += offset; }
         return clone;
       });
@@ -1125,20 +1353,25 @@ export default function Whiteboard({ board, boardList }) {
 
   const finishTextEdit = useCallback(
     (commit) => {
-      setEditingText((draft) => {
-        if (!draft) return null;
-        if (commit && draft.text.trim() !== "") {
-          const { width, height } = measureText(draft.text, draft.fontSize);
-          beginChange();
-          if (draft.isNew) {
-            setElements((prev) => [...prev, { id: draft.id, type: "text", x: draft.x, y: draft.y, text: draft.text, fontSize: draft.fontSize, stroke: draft.stroke, opacity: draft.opacity, width, height }]);
-          } else {
-            setElements((prev) => prev.map((el) => (el.id === draft.id ? { ...el, text: draft.text, width, height } : el)));
-          }
-          endChange();
+      // beginChange/setElements/endChange must NOT be nested inside the
+      // setEditingText updater below — React 18 Strict Mode double-invokes
+      // functional state updaters in dev, and any side effect in the body
+      // (like these calls, which mutate snapshotRef and push onto past/future)
+      // would run twice, corrupting the undo stack. Read the draft via a ref
+      // instead and call them as plain top-level statements, matching how
+      // finishLabelEdit already does this correctly.
+      const draft = editingTextRef.current;
+      if (draft && commit && draft.text.trim() !== "") {
+        const { width, height } = measureText(draft.text, draft.fontSize);
+        beginChange();
+        if (draft.isNew) {
+          setElements((prev) => [...prev, { id: draft.id, type: "text", x: draft.x, y: draft.y, text: draft.text, fontSize: draft.fontSize, stroke: draft.stroke, opacity: draft.opacity, width, height }]);
+        } else {
+          setElements((prev) => prev.map((el) => (el.id === draft.id ? { ...el, text: draft.text, width, height } : el)));
         }
-        return null;
-      });
+        endChange();
+      }
+      setEditingText(null);
       setTool((t) => (t === "text" ? "select" : t));
     },
     [beginChange, endChange]
@@ -1211,10 +1444,16 @@ export default function Whiteboard({ board, boardList }) {
         return;
       }
       if (drag.mode === "shape-draw") {
-        const activeEl = elementsRef.current.find((e2) => e2.id === drag.id);
+        // Use drag.elType/startX/startY (captured at creation time) rather than
+        // looking the just-created element back up via elementsRef.current: that
+        // ref only syncs from an effect keyed on `elements`, which hasn't
+        // necessarily flushed yet by the time the first pointermove fires —
+        // relying on it here silently no-ops the whole drag (patch stays null),
+        // which especially shows up with more render work in flight, e.g. when
+        // another shape is already selected (extra handles/overlays re-rendering).
         let guides = null;
         let patch = null;
-        if (activeEl && (activeEl.type === "rectangle" || activeEl.type === "diamond" || activeEl.type === "ellipse")) {
+        if (drag.elType === "rectangle" || drag.elType === "diamond" || drag.elType === "ellipse") {
           const rawW = x - drag.startX, rawH = y - drag.startY;
           let w = Math.abs(rawW), h = Math.abs(rawH);
           if (e.shiftKey) {
@@ -1244,8 +1483,8 @@ export default function Whiteboard({ board, boardList }) {
             }
           }
           patch = { x: nx, y: ny, w, h };
-        } else if (activeEl && (activeEl.type === "line" || activeEl.type === "arrow")) {
-          patch = { points: [activeEl.points[0], { x, y }] };
+        } else if (drag.elType === "line" || drag.elType === "arrow") {
+          patch = { points: [{ x: drag.startX, y: drag.startY }, { x, y }] };
         }
         setAlignmentGuides(guides);
         setElements((prev) => prev.map((el) => (el.id === drag.id && patch ? { ...el, ...patch } : el)));
@@ -1292,7 +1531,11 @@ export default function Whiteboard({ board, boardList }) {
           const next = prev.map((el) => {
             const orig = drag.origins[el.id];
             if (!orig) return el;
-            if (orig.points) return { ...el, points: orig.points.map((p) => ({ x: p.x + snapDx, y: p.y + snapDy })) };
+            if (orig.points) {
+              const movedPoints = orig.points.map((p) => ({ x: p.x + snapDx, y: p.y + snapDy }));
+              const movedWaypoints = orig.elbowWaypoints ? orig.elbowWaypoints.map((p) => ({ x: p.x + snapDx, y: p.y + snapDy })) : el.elbowWaypoints;
+              return { ...el, points: movedPoints, elbowWaypoints: movedWaypoints };
+            }
             return { ...el, x: orig.x + snapDx, y: orig.y + snapDy };
           });
           return updateBoundArrows(next, movedIds);
@@ -1303,7 +1546,23 @@ export default function Whiteboard({ board, boardList }) {
         const activeEl = elementsRef.current.find((e2) => e2.id === drag.id);
         let patch = null;
         let guides = null;
-        if (activeEl && (activeEl.type === "line" || activeEl.type === "arrow")) {
+        if (activeEl && (activeEl.type === "line" || activeEl.type === "arrow") && typeof drag.handle === "object" && drag.handle.kind === "segment") {
+          // Grab the middle of a straight orthogonal run and slide the whole
+          // segment sideways — both its bend-point endpoints move together
+          // along the perpendicular axis, keeping the segment straight,
+          // matching Excalidraw's elbow-arrow mid-segment drag.
+          const wps = [...drag.originWaypoints];
+          const i = drag.handle.index;
+          const a = wps[i], b = wps[i + 1];
+          if (a.y === b.y) {
+            wps[i] = { ...a, y };
+            wps[i + 1] = { ...b, y };
+          } else {
+            wps[i] = { ...a, x };
+            wps[i + 1] = { ...b, x };
+          }
+          patch = { elbowWaypoints: wps };
+        } else if (activeEl && (activeEl.type === "line" || activeEl.type === "arrow")) {
           const pts = [...drag.originPoints];
           pts[drag.handle] = { x, y };
           patch = { points: pts };
@@ -1402,10 +1661,21 @@ export default function Whiteboard({ board, boardList }) {
                   endBinding = { elementId: endTarget.id, focus: bound.focus, side: bound.side };
                   p1 = bound.point;
                 }
-                return { ...e, points: [p0, p1], startBinding, endBinding };
+                let elbowWaypoints = null;
+                if (e.arrowType === "elbow") {
+                  const startAxis = startTarget ? boundExitAxis(getBBox(startTarget), p1.x, p1.y) : undefined;
+                  const endAxis = endTarget ? boundExitAxis(getBBox(endTarget), p0.x, p0.y) : undefined;
+                  const obstacles = collectElbowObstacles(prev, { ...e, startBinding, endBinding });
+                  const route = computeElbowRoute(p0, p1, startAxis, endAxis, obstacles);
+                  elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
+                }
+                return { ...e, points: [p0, p1], startBinding, endBinding, elbowWaypoints, manuallyRouted: false };
               })
             );
           }
+          // A newly-drawn shape can itself be a new obstacle for existing
+          // elbow arrows elsewhere on the board — re-check them all.
+          setElements((prev) => rerouteAllElbowArrows(prev));
           endChange();
           setSelectedIds([drag.id]);
         }
@@ -1433,16 +1703,42 @@ export default function Whiteboard({ board, boardList }) {
             setElements((prev) =>
               prev.map((e) => {
                 if (e.id !== el.id) return e;
-                if (!target) return { ...e, [bindKey]: null };
-                const bound = getArrowBindPoint(e.arrowType, target, otherPoint.x, otherPoint.y);
                 const pts = [...e.points];
-                pts[drag.handle] = bound.point;
-                return { ...e, points: pts, [bindKey]: { elementId: target.id, focus: bound.focus, side: bound.side } };
+                let newBindingObj = null;
+                if (target) {
+                  const bound = getArrowBindPoint(e.arrowType, target, otherPoint.x, otherPoint.y);
+                  pts[drag.handle] = bound.point;
+                  newBindingObj = { elementId: target.id, focus: bound.focus, side: bound.side };
+                }
+                const startBinding = bindKey === "startBinding" ? newBindingObj : e.startBinding;
+                const endBinding = bindKey === "endBinding" ? newBindingObj : e.endBinding;
+                let elbowWaypoints = e.elbowWaypoints;
+                let manuallyRouted = e.manuallyRouted;
+                if (e.arrowType === "elbow") {
+                  manuallyRouted = false;
+                  const startTarget = startBinding ? prev.find((p2) => p2.id === startBinding.elementId) : null;
+                  const endTarget = endBinding ? prev.find((p2) => p2.id === endBinding.elementId) : null;
+                  const startAxis = startTarget ? boundExitAxis(getBBox(startTarget), pts[1].x, pts[1].y) : undefined;
+                  const endAxis = endTarget ? boundExitAxis(getBBox(endTarget), pts[0].x, pts[0].y) : undefined;
+                  const obstacles = collectElbowObstacles(prev, { ...e, startBinding, endBinding });
+                  const route = computeElbowRoute(pts[0], pts[1], startAxis, endAxis, obstacles);
+                  elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
+                }
+                return { ...e, points: pts, startBinding, endBinding, elbowWaypoints, manuallyRouted };
               })
             );
           }
           setHoverBindTargetId(null);
+        } else if (drag.mode === "resize" && typeof drag.handle === "object" && drag.handle.kind === "segment") {
+          // Live elbowWaypoints patch from the move-handler already has the
+          // dragged position — this just marks the route as user-authored so
+          // auto-routing (updateBoundArrows) won't overwrite it later.
+          setElements((prev) => prev.map((e) => (e.id === drag.id ? { ...e, manuallyRouted: true } : e)));
         }
+        // A move/resize/erase can introduce or remove an obstacle for ANY
+        // elbow arrow on the board, not just ones bound to the shape that
+        // just changed — re-check them all now that the drag has settled.
+        setElements((prev) => rerouteAllElbowArrows(prev));
         setAlignmentGuides(null);
         endChange();
       } else if (drag.mode === "marquee") {
@@ -1485,7 +1781,14 @@ export default function Whiteboard({ board, boardList }) {
         beginDrag({ mode: "marquee", startX: x, startY: y });
         return;
       }
-      if (t === "text") { startTextAt(x, y, null); return; }
+      if (t === "text") {
+        // Prevent the browser's own default mousedown focus-handling, which
+        // otherwise fires after this handler returns and steals focus back
+        // (to <body>) from the textarea we're about to mount and focus.
+        e.preventDefault();
+        startTextAt(x, y, null);
+        return;
+      }
       if (t === "link") { setLinkDraft({ x, y, w: 190, h: 52 }); setTool("select"); refreshProjects(); return; }
       if (t === "embed") { setEmbedDraft({ x, y, w: 420, h: 300 }); setEmbedUrlInput(""); setTool("select"); return; }
       if (t === "eraser") {
@@ -1504,7 +1807,7 @@ export default function Whiteboard({ board, boardList }) {
       const el = createShapeElement(t, x, y, styleRef.current);
       beginChange();
       setElements((prev) => [...prev, el]);
-      beginDrag({ mode: "shape-draw", id: el.id, startX: x, startY: y, arrowDraw: t === "arrow" });
+      beginDrag({ mode: "shape-draw", id: el.id, elType: el.type, startX: x, startY: y, arrowDraw: t === "arrow" });
     },
     [beginChange, beginDrag, editingLabel, editingText, embedDraft, finishLabelEdit, finishTextEdit, interactingEmbedId, linkDraft, projectsPanelOpen, refreshProjects, screenToWorld, startTextAt]
   );
@@ -1538,7 +1841,7 @@ export default function Whiteboard({ board, boardList }) {
       const { x, y } = screenToWorld(e.clientX, e.clientY);
       const origins = {};
       elementsRef.current.forEach((it) => {
-        if (nextSelected.includes(it.id)) origins[it.id] = it.points ? { points: it.points.map((p) => ({ ...p })) } : { x: it.x, y: it.y };
+        if (nextSelected.includes(it.id)) origins[it.id] = it.points ? { points: it.points.map((p) => ({ ...p })), elbowWaypoints: it.elbowWaypoints ? it.elbowWaypoints.map((p) => ({ ...p })) : null } : { x: it.x, y: it.y };
       });
       beginChange();
       beginDrag({ mode: "move", startX: x, startY: y, origins });
@@ -1551,7 +1854,17 @@ export default function Whiteboard({ board, boardList }) {
       e.stopPropagation();
       beginChange();
       if (el.type === "line" || el.type === "arrow") {
-        beginDrag({ mode: "resize", id: el.id, handle, originPoints: el.points.map((p) => ({ ...p })), arrowEndpointResize: el.type === "arrow" });
+        beginDrag({
+          mode: "resize",
+          id: el.id,
+          handle,
+          originPoints: el.points.map((p) => ({ ...p })),
+          originWaypoints: el.elbowWaypoints ? el.elbowWaypoints.map((p) => ({ ...p })) : [],
+          // Only a numeric handle (start=0/end=1) should go through the
+          // start/end rebinding path on pointer-up — waypoint handles use an
+          // object handle id (see handlePositions) and must never rebind.
+          arrowEndpointResize: el.type === "arrow" && typeof handle === "number",
+        });
       } else {
         beginDrag({ mode: "resize", id: el.id, handle, origin: { x: el.x, y: el.y, w: el.w, h: el.h } });
       }
@@ -1877,7 +2190,19 @@ export default function Whiteboard({ board, boardList }) {
     if (singleSelected.locked) return [];
     if (singleSelected.type === "text" || singleSelected.type === "link") return [];
     if (singleSelected.type === "line" || singleSelected.type === "arrow") {
-      return singleSelected.points.map((p, i) => ({ key: `pt-${i}`, handle: i, wx: p.x, wy: p.y }));
+      const endpointHandles = singleSelected.points.map((p, i) => ({ key: `pt-${i}`, handle: i, wx: p.x, wy: p.y }));
+      // One draggable dot per INTERIOR segment midpoint (both ends are bend
+      // points, not the shape-attached start/end) — matches Excalidraw's
+      // elbow arrows, where you grab the middle of a segment and slide the
+      // whole straight run sideways, rather than dragging individual corners.
+      const segmentHandles =
+        singleSelected.type === "arrow" && singleSelected.arrowType === "elbow" && singleSelected.elbowWaypoints && singleSelected.elbowWaypoints.length > 1
+          ? singleSelected.elbowWaypoints.slice(0, -1).map((a, i) => {
+              const b = singleSelected.elbowWaypoints[i + 1];
+              return { key: `seg-${i}`, handle: { kind: "segment", index: i }, wx: (a.x + b.x) / 2, wy: (a.y + b.y) / 2 };
+            })
+          : [];
+      return [...endpointHandles, ...segmentHandles];
     }
     const b = getBBox(singleSelected);
     const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
@@ -2054,10 +2379,12 @@ export default function Whiteboard({ board, boardList }) {
       {singleSelected &&
         handlePositions.map((h) => {
           const s = worldToScreen(h.wx, h.wy);
-          const isEndpoint = singleSelected.type === "line" || singleSelected.type === "arrow";
+          const isWaypoint = typeof h.handle === "object";
+          const isEndpoint = !isWaypoint && (singleSelected.type === "line" || singleSelected.type === "arrow");
+          const size = isWaypoint ? 8 : 12;
           return (
             <div key={h.key} onPointerDown={(e) => handleResizePointerDown(e, singleSelected, h.handle)}
-              style={{ position: "absolute", left: s.x - 6, top: s.y - 6, width: 12, height: 12, borderRadius: isEndpoint ? "50%" : 3, background: "white", border: "2px solid #4C5FF7", cursor: isEndpoint ? "pointer" : cursorForHandle[h.handle], zIndex: 20 }} />
+              style={{ position: "absolute", left: s.x - size / 2, top: s.y - size / 2, width: size, height: size, borderRadius: isEndpoint || isWaypoint ? "50%" : 3, background: "white", border: `2px solid #4C5FF7`, cursor: isWaypoint || isEndpoint ? "pointer" : cursorForHandle[h.handle], zIndex: 20 }} />
           );
         })}
 
@@ -2067,7 +2394,10 @@ export default function Whiteboard({ board, boardList }) {
 
       {editingText && (
         <textarea
+          key={editingText.id}
           ref={textareaRef}
+          autoFocus
+          onFocus={(e) => e.target.select()}
           value={editingText.text}
           onChange={(e) => setEditingText((d) => ({ ...d, text: e.target.value }))}
           onBlur={() => finishTextEdit(true)}
