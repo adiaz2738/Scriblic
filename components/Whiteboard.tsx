@@ -499,6 +499,94 @@ function bestGuideForEdges(list, allowedEdges) {
     .filter((g) => allowedEdges.includes(g.edge))
     .reduce((best, cur) => (!best || Math.abs(cur.delta) < Math.abs(best.delta) ? cur : best), null);
 }
+// Detects equal-gap ("distribute spacing") matches for the active element at
+// its proposed position: either it sits between two neighbors whose gaps on
+// each side are equal (making it the even middle of a three-shape group), or
+// the gap on one of its sides matches a gap that's already equal somewhere
+// else among the other elements (continuing an existing evenly-spaced run).
+// Checked independently along x (row) and y (column). Each match carries the
+// position `delta` needed to make its gaps exactly equal and the gap
+// `regions` (start/end along the checked axis) to render as tick marks.
+function getSpacingGuides(activeBBox, otherElements, threshold = 6) {
+  const guides = { rowGaps: [], colGaps: [] };
+  if (otherElements.length < 2) return guides;
+
+  const axisMatches = (posKey, sizeKey, crossPosKey, crossSizeKey) => {
+    const aStart = activeBBox[posKey], aSize = activeBBox[sizeKey], aEnd = aStart + aSize;
+    const aCenter = aStart + aSize / 2;
+    const aCross = activeBBox[crossPosKey] + activeBBox[crossSizeKey] / 2;
+
+    const others = otherElements.map((el) => {
+      const b = getBBox(el);
+      return { start: b[posKey], end: b[posKey] + b[sizeKey], center: b[posKey] + b[sizeKey] / 2 };
+    });
+
+    const othersSorted = [...others].sort((p, q) => p.center - q.center);
+    const existingGaps = [];
+    for (let i = 0; i < othersSorted.length - 1; i++) {
+      const gap = othersSorted[i + 1].start - othersSorted[i].end;
+      if (gap > 0) existingGaps.push({ gap, from: othersSorted[i].end, to: othersSorted[i + 1].start });
+    }
+
+    const full = [...othersSorted, { start: aStart, end: aEnd, center: aCenter, isActive: true }].sort((p, q) => p.center - q.center);
+    const idx = full.findIndex((p) => p.isActive);
+    const prev = idx > 0 ? full[idx - 1] : null;
+    const next = idx < full.length - 1 ? full[idx + 1] : null;
+
+    const matches = [];
+
+    if (prev && next) {
+      const gapBefore = aStart - prev.end;
+      const gapAfter = next.start - aEnd;
+      if (gapBefore >= -threshold && gapAfter >= -threshold && Math.abs(gapBefore - gapAfter) <= threshold) {
+        const evenGap = (gapBefore + gapAfter) / 2;
+        const targetStart = (prev.end + next.start - aSize) / 2;
+        matches.push({
+          delta: targetStart - aStart,
+          cross: aCross,
+          regions: [
+            { from: prev.end, to: prev.end + evenGap },
+            { from: next.start - evenGap, to: next.start },
+          ],
+        });
+      }
+    }
+
+    for (const g of existingGaps) {
+      if (prev) {
+        const gapBefore = aStart - prev.end;
+        if (gapBefore >= -threshold && Math.abs(gapBefore - g.gap) <= threshold) {
+          matches.push({
+            delta: prev.end + g.gap - aStart,
+            cross: aCross,
+            regions: [{ from: g.from, to: g.to }, { from: prev.end, to: prev.end + g.gap }],
+          });
+        }
+      }
+      if (next) {
+        const gapAfter = next.start - aEnd;
+        if (gapAfter >= -threshold && Math.abs(gapAfter - g.gap) <= threshold) {
+          const targetStart = next.start - g.gap - aSize;
+          matches.push({
+            delta: targetStart - aStart,
+            cross: aCross,
+            regions: [{ from: g.from, to: g.to }, { from: next.start - g.gap, to: next.start }],
+          });
+        }
+      }
+    }
+
+    return matches;
+  };
+
+  guides.rowGaps = axisMatches("x", "w", "y", "h");
+  guides.colGaps = axisMatches("y", "h", "x", "w");
+  return guides;
+}
+// Picks the smallest-delta spacing match, if any (mirrors bestGuideForEdges).
+function bestSpacingMatch(list) {
+  return list.reduce((best, cur) => (!best || Math.abs(cur.delta) < Math.abs(best.delta) ? cur : best), null);
+}
 function distToSegment(px, py, x1, y1, x2, y2) {
   const dx = x2 - x1, dy = y2 - y1;
   const lenSq = dx * dx + dy * dy;
@@ -1571,12 +1659,20 @@ export default function Whiteboard({ board, boardList }) {
           if (bx1 !== Infinity) {
             const proposedBBox = { x: bx1, y: by1, w: bx2 - bx1, h: by2 - by1 };
             const others = currentEls.filter((el) => !movingIds.has(el.id));
-            const g = getAlignmentGuides(proposedBBox, others, 8 / zoomRef.current);
+            const threshold = 8 / zoomRef.current;
+            const g = getAlignmentGuides(proposedBBox, others, threshold);
             const bestV = bestGuideForEdges(g.vertical, ["left", "right", "centerX"]);
             const bestH = bestGuideForEdges(g.horizontal, ["top", "bottom", "centerY"]);
+            const s = getSpacingGuides(proposedBBox, others, threshold);
+            const bestRowGap = bestV ? null : bestSpacingMatch(s.rowGaps);
+            const bestColGap = bestH ? null : bestSpacingMatch(s.colGaps);
             if (bestV) snapDx = rawDx + bestV.delta;
+            else if (bestRowGap) snapDx = rawDx + bestRowGap.delta;
             if (bestH) snapDy = rawDy + bestH.delta;
-            if (g.vertical.length || g.horizontal.length) guides = g;
+            else if (bestColGap) snapDy = rawDy + bestColGap.delta;
+            if (g.vertical.length || g.horizontal.length || s.rowGaps.length || s.colGaps.length) {
+              guides = { ...g, rowGaps: s.rowGaps, colGaps: s.colGaps };
+            }
           }
         }
         setAlignmentGuides(guides);
@@ -2510,6 +2606,16 @@ export default function Whiteboard({ board, boardList }) {
               {alignmentGuides.horizontal.map((g, i) => (
                 <line key={`h-${i}`} x1={g.x1} y1={g.pos} x2={g.x2} y2={g.pos} stroke="#FF4444" strokeWidth={1 / zoom} strokeDasharray={`${4 / zoom} ${3 / zoom}`} />
               ))}
+              {alignmentGuides.rowGaps && alignmentGuides.rowGaps.map((g, i) =>
+                g.regions.map((r, j) => (
+                  <line key={`rg-${i}-${j}`} x1={r.from} y1={g.cross} x2={r.to} y2={g.cross} stroke="#FF4444" strokeWidth={2 / zoom} strokeDasharray={`${2 / zoom} ${2 / zoom}`} />
+                ))
+              )}
+              {alignmentGuides.colGaps && alignmentGuides.colGaps.map((g, i) =>
+                g.regions.map((r, j) => (
+                  <line key={`cg-${i}-${j}`} x1={g.cross} y1={r.from} x2={g.cross} y2={r.to} stroke="#FF4444" strokeWidth={2 / zoom} strokeDasharray={`${2 / zoom} ${2 / zoom}`} />
+                ))
+              )}
             </g>
           )}
         </g>
