@@ -644,16 +644,12 @@ function ellipseBoundaryPoint(bbox, fromX, fromY) {
   const scale = denom === 0 ? 0 : 1 / denom;
   return { x: cx + dx * scale, y: cy + dy * scale };
 }
-// Which side ('h' = left/right, 'v' = top/bottom) of a bbox faces a given
-// point — the same dominant-axis test the focus-binding system already
-// uses to pick an attach side, reused so elbow routing agrees with it.
-function boundExitAxis(bbox, otherX, otherY) {
-  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
-  const dx = otherX - cx, dy = otherY - cy;
-  const nx = Math.abs(dx) / (bbox.w / 2 || 1e-6);
-  const ny = Math.abs(dy) / (bbox.h / 2 || 1e-6);
-  return nx >= ny ? "h" : "v";
-}
+// Once an endpoint is bound, its elbow exit axis must follow the COMMITTED
+// side, not a fresh re-derivation from the other endpoint's position —
+// otherwise a manually-chosen side (e.g. bottom) could stay pinned for the
+// endpoint's actual position while the routing axis independently flips to
+// "horizontal", producing a mismatched/kinked route.
+const SIDE_TO_AXIS = { l: "h", r: "h", t: "v", b: "v" };
 const BIND_FOCUS_SNAP_THRESHOLD = 0.08;
 // `focus` (-1..1) records where along the attached edge a bound endpoint
 // landed, so it can be re-derived from the shape's current bbox as it
@@ -679,16 +675,20 @@ function computeBindSide(bbox, otherX, otherY) {
   if (nx >= ny) return dx >= 0 ? "r" : "l";
   return dy >= 0 ? "b" : "t";
 }
-// Picks the bind point/focus/side for a NEW binding, honoring the arrow's
-// routing style: elbow arrows always center on the facing side (matching
-// Excalidraw), straight arrows keep the angle-derived focus so a
-// deliberately off-center drop is preserved.
-function getArrowBindPoint(arrowType, target, otherX, otherY, gap = 6) {
+// Picks the bind point/focus/side for a NEW binding. `dropX/dropY` must be
+// the endpoint's OWN actual drop location (not the other endpoint) — the
+// side is chosen as whichever edge of the shape is closest to where the
+// user actually released it, honoring a deliberate drop onto e.g. the
+// bottom edge even if the other shape's position would otherwise make
+// left/right the "obvious" facing side. Elbow arrows still center on that
+// side (matching Excalidraw); straight arrows keep the angle-derived focus
+// so a deliberately off-center drop is preserved.
+function getArrowBindPoint(arrowType, target, dropX, dropY, gap = 6) {
   if (arrowType === "elbow") {
     const bbox = getBBox(target);
-    return { point: getFocusedBindPoint(target, 0, otherX, otherY, gap), focus: 0, side: computeBindSide(bbox, otherX, otherY) };
+    return { point: getFocusedBindPoint(target, 0, dropX, dropY, gap), focus: 0, side: computeBindSide(bbox, dropX, dropY) };
   }
-  return getBindPointWithFocus(target, otherX, otherY, gap);
+  return getBindPointWithFocus(target, dropX, dropY, gap);
 }
 function getBindPointWithFocus(el, fromX, fromY, gap = 6) {
   const bbox = getBBox(el);
@@ -702,6 +702,28 @@ function getBindPointWithFocus(el, fromX, fromY, gap = 6) {
   const focus = computeBindFocus(bbox, pt);
   const side = computeBindSide(bbox, fromX, fromY);
   return { point: { x: pt.x + (dx / len) * gap, y: pt.y + (dy / len) * gap }, focus, side };
+}
+const OPPOSITE_SIDE = { l: "r", r: "l", t: "b", b: "t" };
+// Projects onto an explicitly-given side/focus, independent of any other
+// point — used once a binding's side is already committed, so re-renders
+// project onto that exact edge instead of re-deriving which edge "faces"
+// something (which is what getFocusedBindPoint below does).
+function getBindPointForSide(el, side, focus, gap = 6) {
+  const bbox = getBBox(el);
+  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
+  let x, y, gx, gy;
+  if (side === "l" || side === "r") {
+    const s = side === "r" ? 1 : -1;
+    x = cx + s * (bbox.w / 2);
+    y = cy + focus * (bbox.h / 2);
+    gx = s; gy = 0;
+  } else {
+    const s = side === "b" ? 1 : -1;
+    x = cx + focus * (bbox.w / 2);
+    y = cy + s * (bbox.h / 2);
+    gx = 0; gy = s;
+  }
+  return { x: x + gx * gap, y: y + gy * gap };
 }
 // Re-derives a bound endpoint straight from the shape's current bbox and
 // the stored `focus`, so it stays locked to the same relative position on
@@ -739,27 +761,32 @@ function centerOf(el) {
   const b = getBBox(el);
   return { x: b.x + b.w / 2, y: b.y + b.h / 2 };
 }
-// Re-derives a bound endpoint against the shape's current bbox. If the side
-// of the shape now facing the other endpoint differs from the side the
-// binding's `focus` was last computed against, `focus` is re-derived fresh
-// against the new facing side (same calculation used at bind-creation time)
-// so the endpoint re-anchors instead of sliding along the stale side.
-// Elbow arrows always route from the dead center of the facing side (like
-// Excalidraw), so `forceCenter` skips the angle-derived focus entirely and
-// re-centers on every call regardless of whether the side changed — an
-// angle-derived focus would otherwise drift back toward a corner as soon as
-// the other shape isn't perfectly level/aligned.
+// Re-derives a bound endpoint against the shape's current bbox. The
+// committed `binding.side` (chosen at bind time from where the endpoint was
+// actually dropped — see getArrowBindPoint) is kept as-is, even if the
+// dominant-axis "facing side" test would now pick something else, since a
+// deliberate manual choice shouldn't get silently overridden just because
+// the other shape drifted a bit. It's only abandoned when the other
+// endpoint has swung around to the exact OPPOSITE side — the one case
+// where staying on the committed side would force the arrow to visually
+// cut back through the shape's own body to reach it.
+// Elbow arrows always route from the dead center of the (kept) side (like
+// Excalidraw), so `forceCenter` skips the angle-derived focus entirely —
+// an angle-derived focus would otherwise drift back toward a corner as
+// soon as the other shape isn't perfectly level/aligned.
 function getBoundEndpoint(target, binding, otherX, otherY, gap = 6, forceCenter = false) {
   const bbox = getBBox(target);
-  const newSide = computeBindSide(bbox, otherX, otherY);
-  if (forceCenter) {
-    return { point: getFocusedBindPoint(target, 0, otherX, otherY, gap), binding: { elementId: binding.elementId, focus: 0, side: newSide } };
-  }
-  if (newSide !== binding.side) {
-    const bound = getBindPointWithFocus(target, otherX, otherY, gap);
+  const naiveSide = computeBindSide(bbox, otherX, otherY);
+  const invalid = OPPOSITE_SIDE[binding.side] === naiveSide;
+  if (invalid) {
+    const bound = forceCenter
+      ? { point: getFocusedBindPoint(target, 0, otherX, otherY, gap), focus: 0, side: naiveSide }
+      : getBindPointWithFocus(target, otherX, otherY, gap);
     return { point: bound.point, binding: { elementId: binding.elementId, focus: bound.focus, side: bound.side } };
   }
-  return { point: getFocusedBindPoint(target, binding.focus || 0, otherX, otherY, gap), binding };
+  const focus = forceCenter ? 0 : (binding.focus || 0);
+  const point = getBindPointForSide(target, binding.side, focus, gap);
+  return { point, binding: forceCenter && binding.focus !== 0 ? { ...binding, focus: 0 } : binding };
 }
 function updateBoundArrows(elements, updatedIds) {
   const byId = new Map(elements.map((el) => [el.id, el]));
@@ -793,10 +820,8 @@ function updateBoundArrows(elements, updatedIds) {
     if (el.arrowType === "elbow" && el.manuallyRouted !== true) {
       const startTarget = startBinding && byId.get(startBinding.elementId);
       const endTarget = endBinding && byId.get(endBinding.elementId);
-      const otherForStart = endTarget ? centerOf(endTarget) : p1;
-      const otherForEnd = startTarget ? centerOf(startTarget) : p0;
-      const startAxis = startTarget ? boundExitAxis(getBBox(startTarget), otherForStart.x, otherForStart.y) : undefined;
-      const endAxis = endTarget ? boundExitAxis(getBBox(endTarget), otherForEnd.x, otherForEnd.y) : undefined;
+      const startAxis = startTarget ? SIDE_TO_AXIS[startBinding.side] : undefined;
+      const endAxis = endTarget ? SIDE_TO_AXIS[endBinding.side] : undefined;
       const obstacles = collectElbowObstacles(elements, el);
       const route = computeElbowRoute(p0, p1, startAxis, endAxis, obstacles);
       elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
@@ -838,10 +863,8 @@ function rerouteAllElbowArrows(elements) {
     const [p0, p1] = el.points;
     const startTarget = el.startBinding && byId.get(el.startBinding.elementId);
     const endTarget = el.endBinding && byId.get(el.endBinding.elementId);
-    const otherForStart = endTarget ? centerOf(endTarget) : p1;
-    const otherForEnd = startTarget ? centerOf(startTarget) : p0;
-    const startAxis = startTarget ? boundExitAxis(getBBox(startTarget), otherForStart.x, otherForStart.y) : undefined;
-    const endAxis = endTarget ? boundExitAxis(getBBox(endTarget), otherForEnd.x, otherForEnd.y) : undefined;
+    const startAxis = startTarget ? SIDE_TO_AXIS[el.startBinding.side] : undefined;
+    const endAxis = endTarget ? SIDE_TO_AXIS[el.endBinding.side] : undefined;
     const obstacles = collectElbowObstacles(elements, el);
     const route = computeElbowRoute(p0, p1, startAxis, endAxis, obstacles);
     const elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
@@ -892,8 +915,15 @@ function reorderElements(elements, selectedIds, direction) {
   }
   return arr;
 }
+let _measureCtx = null;
 function measureText(text, fontSize) {
   const lines = text.split("\n");
+  if (typeof document !== "undefined") {
+    if (!_measureCtx) _measureCtx = document.createElement("canvas").getContext("2d");
+    _measureCtx.font = `${fontSize}px 'Kalam', cursive`;
+    const width = Math.max(1, ...lines.map((l) => _measureCtx.measureText(l || " ").width));
+    return { width: Math.max(30, width), height: Math.max(fontSize * 1.35, lines.length * fontSize * 1.35) };
+  }
   const longest = Math.max(1, ...lines.map((l) => l.length));
   return { width: Math.max(30, longest * fontSize * 0.56), height: Math.max(fontSize * 1.35, lines.length * fontSize * 1.35) };
 }
@@ -978,10 +1008,10 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        {el.fill === "transparent" && !isSelected && (
+        {el.fill === "transparent" && !isSelected && !el.label && (
           <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="none" stroke="transparent" strokeWidth={16} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "stroke", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         )}
-        {(el.fill !== "transparent" || isSelected) && (
+        {(el.fill !== "transparent" || isSelected || el.label) && (
           <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         )}
         {el.fill !== "transparent" && (
@@ -1000,10 +1030,10 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        {el.fill === "transparent" && !isSelected && (
+        {el.fill === "transparent" && !isSelected && !el.label && (
           <polygon points={pts.map((p) => p.join(",")).join(" ")} fill="none" stroke="transparent" strokeWidth={16} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "stroke", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         )}
-        {(el.fill !== "transparent" || isSelected) && (
+        {(el.fill !== "transparent" || isSelected || el.label) && (
           <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         )}
         {el.fill !== "transparent" && (
@@ -1022,10 +1052,10 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        {el.fill === "transparent" && !isSelected && (
+        {el.fill === "transparent" && !isSelected && !el.label && (
           <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="none" stroke="transparent" strokeWidth={16} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "stroke", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         )}
-        {(el.fill !== "transparent" || isSelected) && (
+        {(el.fill !== "transparent" || isSelected || el.label) && (
           <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         )}
         {el.fill !== "transparent" && <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill={el.fill} stroke="none" />}
@@ -1068,11 +1098,14 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
   if (type === "text") {
     const lines = el.text.split("\n");
     return (
-      <text x={el.x} y={el.y + el.fontSize} fontFamily="'Kalam', cursive" fontSize={el.fontSize} fill={el.stroke} style={{ userSelect: "none" }}>
-        {lines.map((line, i) => (
-          <tspan key={i} x={el.x} dy={i === 0 ? 0 : el.fontSize * 1.35}>{line || " "}</tspan>
-        ))}
-      </text>
+      <>
+        <rect x={el.x} y={el.y} width={el.width || 40} height={el.height || 30} fill="transparent" style={{ pointerEvents: "all" }} />
+        <text x={el.x} y={el.y + el.fontSize} fontFamily="'Kalam', cursive" fontSize={el.fontSize} fill={el.stroke} style={{ userSelect: "none" }}>
+          {lines.map((line, i) => (
+            <tspan key={i} x={el.x} dy={i === 0 ? 0 : el.fontSize * 1.35}>{line || " "}</tspan>
+          ))}
+        </text>
+      </>
     );
   }
   if (type === "image") {
@@ -1849,20 +1882,20 @@ export default function Whiteboard({ board, boardList }) {
                 let startBinding = null, endBinding = null;
                 const startTarget = findBindTarget(prev, p0.x, p0.y, e.id, 10 / zoomRef.current);
                 if (startTarget) {
-                  const bound = getArrowBindPoint(e.arrowType, startTarget, p1.x, p1.y);
+                  const bound = getArrowBindPoint(e.arrowType, startTarget, p0.x, p0.y);
                   startBinding = { elementId: startTarget.id, focus: bound.focus, side: bound.side };
                   p0 = bound.point;
                 }
                 const endTarget = findBindTarget(prev, p1.x, p1.y, e.id, 10 / zoomRef.current);
                 if (endTarget) {
-                  const bound = getArrowBindPoint(e.arrowType, endTarget, p0.x, p0.y);
+                  const bound = getArrowBindPoint(e.arrowType, endTarget, p1.x, p1.y);
                   endBinding = { elementId: endTarget.id, focus: bound.focus, side: bound.side };
                   p1 = bound.point;
                 }
                 let elbowWaypoints = null;
                 if (e.arrowType === "elbow") {
-                  const startAxis = startTarget ? boundExitAxis(getBBox(startTarget), p1.x, p1.y) : undefined;
-                  const endAxis = endTarget ? boundExitAxis(getBBox(endTarget), p0.x, p0.y) : undefined;
+                  const startAxis = startTarget ? SIDE_TO_AXIS[startBinding.side] : undefined;
+                  const endAxis = endTarget ? SIDE_TO_AXIS[endBinding.side] : undefined;
                   const obstacles = collectElbowObstacles(prev, { ...e, startBinding, endBinding });
                   const route = computeElbowRoute(p0, p1, startAxis, endAxis, obstacles);
                   elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
@@ -1896,7 +1929,6 @@ export default function Whiteboard({ board, boardList }) {
           if (el && el.type === "arrow") {
             const point = el.points[drag.handle];
             const bindKey = drag.handle === 0 ? "startBinding" : "endBinding";
-            const otherPoint = el.points[drag.handle === 0 ? 1 : 0];
             let target = findBindTarget(elementsRef.current, point.x, point.y, el.id, 10 / zoomRef.current);
             if (!target && drag.originBinding) {
               // Released just outside the shape's normal hit zone — retry
@@ -1915,7 +1947,7 @@ export default function Whiteboard({ board, boardList }) {
                 const pts = [...e.points];
                 let newBindingObj = null;
                 if (target) {
-                  const bound = getArrowBindPoint(e.arrowType, target, otherPoint.x, otherPoint.y);
+                  const bound = getArrowBindPoint(e.arrowType, target, point.x, point.y);
                   pts[drag.handle] = bound.point;
                   newBindingObj = { elementId: target.id, focus: bound.focus, side: bound.side };
                 }
@@ -1927,8 +1959,8 @@ export default function Whiteboard({ board, boardList }) {
                   manuallyRouted = false;
                   const startTarget = startBinding ? prev.find((p2) => p2.id === startBinding.elementId) : null;
                   const endTarget = endBinding ? prev.find((p2) => p2.id === endBinding.elementId) : null;
-                  const startAxis = startTarget ? boundExitAxis(getBBox(startTarget), pts[1].x, pts[1].y) : undefined;
-                  const endAxis = endTarget ? boundExitAxis(getBBox(endTarget), pts[0].x, pts[0].y) : undefined;
+                  const startAxis = startTarget ? SIDE_TO_AXIS[startBinding.side] : undefined;
+                  const endAxis = endTarget ? SIDE_TO_AXIS[endBinding.side] : undefined;
                   const obstacles = collectElbowObstacles(prev, { ...e, startBinding, endBinding });
                   const route = computeElbowRoute(pts[0], pts[1], startAxis, endAxis, obstacles);
                   elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
@@ -2045,14 +2077,46 @@ export default function Whiteboard({ board, boardList }) {
       } else if (!nextSelected.includes(el.id)) {
         nextSelected = groupIds;
       }
-      setSelectedIds(nextSelected);
 
       const { x, y } = screenToWorld(e.clientX, e.clientY);
+      beginChange();
+
+      // Alt+drag duplicates whatever is (about to be) selected and drags the
+      // copies, leaving the originals in place — applies uniformly to every
+      // element type since it's keyed only on selection + the modifier key,
+      // never on el.type.
+      if (e.altKey && nextSelected.length > 0) {
+        const originals = elementsRef.current.filter((it) => nextSelected.includes(it.id));
+        const idMap = new Map(originals.map((it) => [it.id, genId()]));
+        const dupes = originals.map((it) => {
+          const clone = { ...it, id: idMap.get(it.id) };
+          if (clone.points) clone.points = clone.points.map((p) => ({ ...p }));
+          if (clone.elbowWaypoints) clone.elbowWaypoints = clone.elbowWaypoints.map((p) => ({ ...p }));
+          if (clone.type === "arrow") {
+            if (clone.startBinding && idMap.has(clone.startBinding.elementId)) {
+              clone.startBinding = { ...clone.startBinding, elementId: idMap.get(clone.startBinding.elementId) };
+            }
+            if (clone.endBinding && idMap.has(clone.endBinding.elementId)) {
+              clone.endBinding = { ...clone.endBinding, elementId: idMap.get(clone.endBinding.elementId) };
+            }
+          }
+          return clone;
+        });
+        const origins = {};
+        dupes.forEach((d) => {
+          origins[d.id] = d.points ? { points: d.points.map((p) => ({ ...p })), elbowWaypoints: d.elbowWaypoints ? d.elbowWaypoints.map((p) => ({ ...p })) : null } : { x: d.x, y: d.y };
+        });
+        setElements((prev) => [...prev, ...dupes]);
+        setSelectedIds(dupes.map((d) => d.id));
+        beginDrag({ mode: "move", startX: x, startY: y, origins });
+        return;
+      }
+
+      setSelectedIds(nextSelected);
       const origins = {};
       elementsRef.current.forEach((it) => {
         if (nextSelected.includes(it.id)) origins[it.id] = it.points ? { points: it.points.map((p) => ({ ...p })), elbowWaypoints: it.elbowWaypoints ? it.elbowWaypoints.map((p) => ({ ...p })) : null } : { x: it.x, y: it.y };
       });
-      beginChange();
       beginDrag({ mode: "move", startX: x, startY: y, origins });
     },
     [beginChange, beginDrag, boardId, editingLabel, editingText, finishLabelEdit, finishTextEdit, goToBoard, screenToWorld, startTextAt]
@@ -2516,10 +2580,8 @@ export default function Whiteboard({ board, boardList }) {
             if (el.type === "arrow" && el.arrowType === "elbow") {
               const startTarget = el.startBinding && elements.find((e) => e.id === el.startBinding.elementId);
               const endTarget = el.endBinding && elements.find((e) => e.id === el.endBinding.elementId);
-              const otherForStart = endTarget ? centerOf(endTarget) : el.points[1];
-              const otherForEnd = startTarget ? centerOf(startTarget) : el.points[0];
-              elbowStartAxis = startTarget ? boundExitAxis(getBBox(startTarget), otherForStart.x, otherForStart.y) : undefined;
-              elbowEndAxis = endTarget ? boundExitAxis(getBBox(endTarget), otherForEnd.x, otherForEnd.y) : undefined;
+              elbowStartAxis = startTarget ? SIDE_TO_AXIS[el.startBinding.side] : undefined;
+              elbowEndAxis = endTarget ? SIDE_TO_AXIS[el.endBinding.side] : undefined;
             }
             return (
               <g
