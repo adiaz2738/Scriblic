@@ -16,6 +16,15 @@ import { ShapeSvg, getBBox, LIGHT } from "./Whiteboard";
 export default function BoardViewer({ board, dynamic = false }) {
   const els = board.elements || [];
   const noop = () => {};
+  // Starts false so the client's first hydration render matches the
+  // server-rendered HTML (no <canvas> there, so label text wrapping in
+  // ShapeSvg/ShapeLabel falls back to a rough estimate) — flips true
+  // post-mount so labels re-wrap using real canvas font metrics. See
+  // wrapLabelLines in Whiteboard.tsx for why this must not just check
+  // `typeof document` inline (document already exists client-side by the
+  // very first hydration render, before this effect has run).
+  const [canvasReady, setCanvasReady] = useState(false);
+  useEffect(() => { setCanvasReady(true); }, []);
 
   if (els.length === 0) {
     return (
@@ -37,7 +46,7 @@ export default function BoardViewer({ board, dynamic = false }) {
           <rect x={minX} y={minY} width={w} height={h} fill={board.canvasBg || "#FFFFFF"} />
           {els.map((el) => (
             <g key={el.id} opacity={el.opacity}>
-              <ShapeSvg el={el} theme={LIGHT} isEmbedInteracting={false} hideLabel={false} onLabelDoubleClick={noop} />
+              <ShapeSvg el={el} theme={LIGHT} isEmbedInteracting={false} hideLabel={false} onLabelDoubleClick={noop} canvasReady={canvasReady} />
             </g>
           ))}
         </svg>
@@ -55,6 +64,10 @@ function DynamicBoardViewer({ board, els, contentBox }) {
   const [zoom, setZoom] = useState(1);
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef(null);
+  // See the matching comment in BoardViewer above — this is a separate
+  // component instance with its own mount/hydration lifecycle.
+  const [canvasReady, setCanvasReady] = useState(false);
+  useEffect(() => { setCanvasReady(true); }, []);
 
   useEffect(() => {
     const node = containerRef.current;
@@ -137,7 +150,7 @@ function DynamicBoardViewer({ board, els, contentBox }) {
         <g id="content-layer" transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
           {els.map((el) => (
             <g key={el.id} opacity={el.opacity}>
-              <ShapeSvg el={el} theme={LIGHT} isEmbedInteracting={false} hideLabel={false} onLabelDoubleClick={noop} />
+              <ShapeSvg el={el} theme={LIGHT} isEmbedInteracting={false} hideLabel={false} onLabelDoubleClick={noop} canvasReady={canvasReady} />
             </g>
           ))}
         </g>

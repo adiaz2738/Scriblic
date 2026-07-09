@@ -42,6 +42,9 @@ import {
   ChevronUp,
   ChevronsUp,
   AlertTriangle,
+  AlignLeft,
+  AlignCenter,
+  AlignRight,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -105,6 +108,16 @@ const FONT_SIZES = [
   { label: "M", value: 24 },
   { label: "L", value: 36 },
   { label: "XL", value: 52 },
+];
+// Free-transform (drag-corner) text resizing scales font size continuously
+// rather than snapping to a FONT_SIZES preset — clamp its floor to the same
+// smallest preset so that path can't produce illegibly small text either.
+const MIN_FONT_SIZE = FONT_SIZES[0].value;
+
+const TEXT_ALIGNS = [
+  { value: "left", icon: AlignLeft },
+  { value: "center", icon: AlignCenter },
+  { value: "right", icon: AlignRight },
 ];
 
 const ROUGHNESS = [
@@ -941,25 +954,87 @@ function reorderElements(elements, selectedIds, direction) {
   return arr;
 }
 let _measureCtx = null;
+function getMeasureCtx(fontSize) {
+  if (typeof document === "undefined") return null;
+  if (!_measureCtx) _measureCtx = document.createElement("canvas").getContext("2d");
+  _measureCtx.font = `${fontSize}px 'Kalam', cursive`;
+  return _measureCtx;
+}
 function measureText(text, fontSize) {
   const lines = text.split("\n");
-  if (typeof document !== "undefined") {
-    if (!_measureCtx) _measureCtx = document.createElement("canvas").getContext("2d");
-    _measureCtx.font = `${fontSize}px 'Kalam', cursive`;
-    const width = Math.max(1, ...lines.map((l) => _measureCtx.measureText(l || " ").width));
+  const ctx = getMeasureCtx(fontSize);
+  if (ctx) {
+    const width = Math.max(1, ...lines.map((l) => ctx.measureText(l || " ").width));
     return { width: Math.max(30, width), height: Math.max(fontSize * 1.35, lines.length * fontSize * 1.35) };
   }
   const longest = Math.max(1, ...lines.map((l) => l.length));
   return { width: Math.max(30, longest * fontSize * 0.56), height: Math.max(fontSize * 1.35, lines.length * fontSize * 1.35) };
 }
-const LABEL_PADDING = 24;
-function growBoxForLabel(box, text, fontSize) {
-  const measured = measureText(text || " ", fontSize);
-  const w = Math.max(box.w, measured.width + LABEL_PADDING * 2);
-  const h = Math.max(box.h, measured.height + LABEL_PADDING * 2);
-  if (w === box.w && h === box.h) return box;
-  const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
-  return { x: cx - w / 2, y: cy - h / 2, w, h };
+const LABEL_PADDING = 12;
+// Wraps label text to fit within maxWidth: explicit newlines are hard
+// breaks, words wrap normally within each, and a single word wider than
+// maxWidth on its own is broken mid-word (as many characters as fit per
+// line) rather than left overflowing — this is what lets a labeled shape
+// keep shrinking horizontally down to a single character's width.
+// `precise` gates whether a real <canvas> is used for measurement. It must
+// default to true for interactive callers (typing, resizing — always
+// client-side, well after mount) but be explicitly forced false for the
+// very first client render during hydration: `document` exists in the
+// browser from that first render on, so without this flag the client would
+// immediately measure with the real canvas while the server-rendered HTML
+// (Node, no canvas) used the crude char-count fallback — different wrap
+// points on each side is exactly what trips React's hydration mismatch
+// check. See the `canvasReady` prop threaded through ShapeSvg/ShapeLabel.
+function wrapLabelLines(text, fontSize, maxWidth, precise = true) {
+  const ctx = precise ? getMeasureCtx(fontSize) : null;
+  const measure = (s) => (ctx ? ctx.measureText(s).width : s.length * fontSize * 0.56);
+  const hardLines = text.split("\n");
+  const lines = [];
+  for (const hardLine of hardLines) {
+    const words = hardLine.split(" ").filter((w) => w !== "");
+    if (words.length === 0) { lines.push(""); continue; }
+    let current = "";
+    for (const word of words) {
+      let remaining = word;
+      while (remaining.length > 0) {
+        const candidate = current ? `${current} ${remaining}` : remaining;
+        if (measure(candidate) <= maxWidth) {
+          current = candidate;
+          remaining = "";
+        } else if (current !== "") {
+          lines.push(current);
+          current = "";
+        } else {
+          // Doesn't fit even alone on an empty line — break it letter by
+          // letter, taking as many characters as fit on this line.
+          let chunk = remaining[0];
+          let i = 1;
+          for (; i < remaining.length; i++) {
+            const next = chunk + remaining[i];
+            if (measure(next) > maxWidth) break;
+            chunk = next;
+          }
+          lines.push(chunk);
+          remaining = remaining.slice(i);
+        }
+      }
+    }
+    lines.push(current);
+  }
+  return lines;
+}
+// Auto-fits a labeled shape's HEIGHT to however many lines its label wraps
+// into AT THE BOX'S CURRENT WIDTH — width is never touched here (it's
+// purely user-controlled via manual resize handles). Anchored at the top:
+// only the bottom edge moves, so the box grows/shrinks symmetrically as
+// text is added or removed, rather than only ever growing.
+function fitLabelBoxHeight(box, text, fontSize) {
+  const maxWidth = Math.max(1, box.w - LABEL_PADDING * 2);
+  const lines = wrapLabelLines(text || " ", fontSize, maxWidth);
+  const lineHeight = fontSize * 1.35;
+  const neededH = Math.max(lineHeight, lines.length * lineHeight) + LABEL_PADDING * 2;
+  if (neededH === box.h) return box;
+  return { x: box.x, y: box.y, w: box.w, h: neededH };
 }
 function createShapeElement(type, x, y, style) {
   const base = { id: genId(), type, stroke: style.stroke, fill: style.fill, strokeWidth: style.strokeWidth, roughness: style.roughness, opacity: style.opacity, seed: Math.floor(Math.random() * 100000) + 1 };
@@ -1009,23 +1084,30 @@ function downscaleImageFile(file) {
 /* ---------------------------------------------------------------
    Shape renderer
 ----------------------------------------------------------------*/
-function ShapeLabel({ el, hidden }) {
+function ShapeLabel({ el, hidden, canvasReady }) {
   if (!el.label || hidden) return null;
-  const cx = el.x + el.w / 2;
   const cy = el.y + el.h / 2;
   const fontSize = el.labelFontSize || 16;
-  const lines = el.label.split("\n");
-  const lineHeight = fontSize * 1.3;
+  // Wrapped the same way fitLabelBoxHeight sized the box, so the rendered
+  // line count always matches what the box's height was computed for.
+  const lines = wrapLabelLines(el.label, fontSize, Math.max(1, el.w - LABEL_PADDING * 2), canvasReady);
+  const lineHeight = fontSize * 1.35;
   const startY = cy - ((lines.length - 1) * lineHeight) / 2;
+  const align = el.labelAlign || "center";
+  // Same LABEL_PADDING already reserved on each side by fitLabelBoxHeight, so
+  // left/right-aligned text lines up flush with that reserved inset rather
+  // than the shape's bare edge.
+  const tx = align === "left" ? el.x + LABEL_PADDING : align === "right" ? el.x + el.w - LABEL_PADDING : el.x + el.w / 2;
+  const textAnchor = align === "left" ? "start" : align === "right" ? "end" : "middle";
   return (
-    <text x={cx} y={startY} textAnchor="middle" dominantBaseline="middle" fontFamily="'Kalam', cursive" fontSize={fontSize} fill={el.stroke} style={{ userSelect: "none", pointerEvents: "none" }}>
+    <text x={tx} y={startY} textAnchor={textAnchor} dominantBaseline="middle" fontFamily="'Kalam', cursive" fontSize={fontSize} fill={el.stroke} style={{ userSelect: "none", pointerEvents: "none" }}>
       {lines.map((line, i) => (
-        <tspan key={i} x={cx} y={startY + i * lineHeight}>{line || " "}</tspan>
+        <tspan key={i} x={tx} y={startY + i * lineHeight}>{line || " "}</tspan>
       ))}
     </text>
   );
 }
-export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick, isSelected = false, elbowStartSide = undefined, elbowEndSide = undefined }) {
+export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick, isSelected = false, elbowStartSide = undefined, elbowEndSide = undefined, canvasReady = false }) {
   const { type, seed, roughness } = el;
   if (type === "rectangle") {
     const pts = [[el.x, el.y], [el.x + el.w, el.y], [el.x + el.w, el.y + el.h], [el.x, el.y + el.h]];
@@ -1045,7 +1127,7 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
             : <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={el.fill} stroke="none" />
         )}
         <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
-        <ShapeLabel el={el} hidden={hideLabel} />
+        <ShapeLabel el={el} hidden={hideLabel} canvasReady={canvasReady} />
       </>
     );
   }
@@ -1067,7 +1149,7 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
             : <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={el.fill} stroke="none" />
         )}
         <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
-        <ShapeLabel el={el} hidden={hideLabel} />
+        <ShapeLabel el={el} hidden={hideLabel} canvasReady={canvasReady} />
       </>
     );
   }
@@ -1085,7 +1167,7 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
         )}
         {el.fill !== "transparent" && <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill={el.fill} stroke="none" />}
         <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
-        <ShapeLabel el={el} hidden={hideLabel} />
+        <ShapeLabel el={el} hidden={hideLabel} canvasReady={canvasReady} />
       </>
     );
   }
@@ -1122,12 +1204,16 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
   }
   if (type === "text") {
     const lines = el.text.split("\n");
+    const width = el.width || 40;
+    const align = el.align || "left";
+    const tx = align === "left" ? el.x : align === "right" ? el.x + width : el.x + width / 2;
+    const textAnchor = align === "left" ? "start" : align === "right" ? "end" : "middle";
     return (
       <>
-        <rect x={el.x} y={el.y} width={el.width || 40} height={el.height || 30} fill="transparent" style={{ pointerEvents: "all" }} />
-        <text x={el.x} y={el.y + el.fontSize} fontFamily="'Kalam', cursive" fontSize={el.fontSize} fill={el.stroke} style={{ userSelect: "none" }}>
+        <rect x={el.x} y={el.y} width={width} height={el.height || 30} fill="transparent" style={{ pointerEvents: "all" }} />
+        <text x={tx} y={el.y + el.fontSize} textAnchor={textAnchor} fontFamily="'Kalam', cursive" fontSize={el.fontSize} fill={el.stroke} style={{ userSelect: "none" }}>
           {lines.map((line, i) => (
-            <tspan key={i} x={el.x} dy={i === 0 ? 0 : el.fontSize * 1.35}>{line || " "}</tspan>
+            <tspan key={i} x={tx} dy={i === 0 ? 0 : el.fontSize * 1.35}>{line || " "}</tspan>
           ))}
         </text>
       </>
@@ -1188,7 +1274,7 @@ export default function Whiteboard({ board, boardList }) {
   const [canvasBg, setCanvasBg] = useState(board.canvasBg || CANVAS_BACKGROUNDS[0].value);
   const [selectedIds, setSelectedIds] = useState([]);
   const [tool, setTool] = useState("select");
-  const [style, setStyle] = useState(() => ({ stroke: defaultStrokeForBg(board.canvasBg || CANVAS_BACKGROUNDS[0].value), fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, edges: "sharp", arrowType: "elbow" }));
+  const [style, setStyle] = useState(() => ({ stroke: defaultStrokeForBg(board.canvasBg || CANVAS_BACKGROUNDS[0].value), fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, align: "left", edges: "sharp", arrowType: "elbow" }));
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [marquee, setMarquee] = useState(null);
@@ -1208,6 +1294,12 @@ export default function Whiteboard({ board, boardList }) {
   const [saveStatus, setSaveStatus] = useState("saved"); // idle | saving | saved | error
   const [past, setPast] = useState([]);
   const [future, setFuture] = useState([]);
+  // Starts false so the client's first hydration render matches the
+  // server-rendered HTML (server has no <canvas>, so label wrapping always
+  // falls back to a rough estimate there) — flips true post-mount so label
+  // text then re-wraps using real canvas font metrics. See wrapLabelLines.
+  const [canvasReady, setCanvasReady] = useState(false);
+  useEffect(() => { setCanvasReady(true); }, []);
 
   const containerRef = useRef(null);
   const svgRef = useRef(null);
@@ -1577,7 +1669,7 @@ export default function Whiteboard({ board, boardList }) {
         const { width, height } = measureText(draft.text, draft.fontSize);
         beginChange();
         if (draft.isNew) {
-          setElements((prev) => [...prev, { id: draft.id, type: "text", x: draft.x, y: draft.y, text: draft.text, fontSize: draft.fontSize, stroke: draft.stroke, opacity: draft.opacity, width, height }]);
+          setElements((prev) => [...prev, { id: draft.id, type: "text", x: draft.x, y: draft.y, text: draft.text, fontSize: draft.fontSize, align: draft.align || "left", stroke: draft.stroke, opacity: draft.opacity, width, height }]);
         } else {
           setElements((prev) => prev.map((el) => (el.id === draft.id ? { ...el, text: draft.text, width, height } : el)));
         }
@@ -1591,9 +1683,9 @@ export default function Whiteboard({ board, boardList }) {
 
   const startTextAt = useCallback((x, y, existing) => {
     if (existing) {
-      setEditingText({ id: existing.id, x: existing.x, y: existing.y, text: existing.text, fontSize: existing.fontSize, stroke: existing.stroke, opacity: existing.opacity, isNew: false });
+      setEditingText({ id: existing.id, x: existing.x, y: existing.y, text: existing.text, fontSize: existing.fontSize, align: existing.align || "left", stroke: existing.stroke, opacity: existing.opacity, isNew: false });
     } else {
-      setEditingText({ id: genId(), x, y, text: "", fontSize: styleRef.current.fontSize, stroke: styleRef.current.stroke, opacity: styleRef.current.opacity, isNew: true });
+      setEditingText({ id: genId(), x, y, text: "", fontSize: styleRef.current.fontSize, align: styleRef.current.align || "left", stroke: styleRef.current.stroke, opacity: styleRef.current.opacity, isNew: true });
     }
   }, []);
 
@@ -1633,11 +1725,12 @@ export default function Whiteboard({ board, boardList }) {
   const onLabelTextChange = useCallback((text) => {
     const draft = editingLabelRef.current;
     if (!draft) return;
-    const grown = growBoxForLabel(draft, text, draft.fontSize);
-    if (grown !== draft) {
-      setElements(elementsRef.current.map((el) => (el.id === draft.id ? { ...el, x: grown.x, y: grown.y, w: grown.w, h: grown.h } : el)));
-    }
-    setEditingLabel({ ...draft, text, x: grown.x, y: grown.y, w: grown.w, h: grown.h });
+    const fitted = fitLabelBoxHeight(draft, text, draft.fontSize);
+    // Write `label` onto the actual element live (not just at commit) so
+    // sidebar controls gated on `el.label` (Label size/align) show up while
+    // typing a brand-new label, not only after clicking away and reselecting.
+    setElements(elementsRef.current.map((el) => (el.id === draft.id ? { ...el, label: text, x: fitted.x, y: fitted.y, w: fitted.w, h: fitted.h } : el)));
+    setEditingLabel({ ...draft, text, x: fitted.x, y: fitted.y, w: fitted.w, h: fitted.h });
   }, []);
 
   const onWindowPointerMove = useCallback(
@@ -1829,7 +1922,7 @@ export default function Whiteboard({ board, boardList }) {
           const scaleX = affectsX ? rawW / o.w : null;
           const scaleY = affectsY ? rawH / o.h : null;
           const scale = scaleX !== null && scaleY !== null ? (scaleX + scaleY) / 2 : scaleX !== null ? scaleX : scaleY;
-          const nextFontSize = Math.min(400, Math.max(8, drag.originFontSize * scale));
+          const nextFontSize = Math.min(400, Math.max(MIN_FONT_SIZE, drag.originFontSize * scale));
           const { width: nw, height: nh } = measureText(activeEl.text, nextFontSize);
           const nx = h.includes("w") ? o.x + o.w - nw : o.x;
           const ny = h.includes("n") ? o.y + o.h - nh : o.y;
@@ -1839,11 +1932,40 @@ export default function Whiteboard({ board, boardList }) {
           const h = drag.handle;
           const affectsX = h.includes("e") || h.includes("w");
           const affectsY = h.includes("n") || h.includes("s");
-          let nw = affectsX ? Math.max(4, h.includes("e") ? x - o.x : o.x + o.w - x) : o.w;
-          let nh = affectsY ? Math.max(4, h.includes("s") ? y - o.y : o.y + o.h - y) : o.h;
+          // A labeled shape can shrink width down to just its widest single
+          // CHARACTER (plus padding) — the label wraps word-by-word, and
+          // breaks mid-word letter-by-letter once a whole word no longer
+          // fits, so a single character is the true floor rather than the
+          // whole word or the full unwrapped text. Height only needs to fit
+          // one line at minimum; wrapping adds lines (and the box's own
+          // auto-fit, fitLabelBoxHeight, grows to match) as width shrinks.
+          let minW = 4, minH = 4;
+          if (activeEl.label && LABELABLE_TYPES.includes(activeEl.type)) {
+            const labelFontSize = activeEl.labelFontSize || 16;
+            const ctx = getMeasureCtx(labelFontSize);
+            const chars = activeEl.label.replace(/\n/g, "").split("");
+            const maxCharWidth = chars.length
+              ? Math.max(...chars.map((c) => (ctx ? ctx.measureText(c).width : labelFontSize * 0.56)))
+              : 0;
+            minW = maxCharWidth + LABEL_PADDING * 2;
+            minH = labelFontSize * 1.35 + LABEL_PADDING * 2;
+          }
+          let nw = affectsX ? Math.max(minW, h.includes("e") ? x - o.x : o.x + o.w - x) : o.w;
+          let nh = affectsY ? Math.max(minH, h.includes("s") ? y - o.y : o.y + o.h - y) : o.h;
           if (e.shiftKey && affectsX && affectsY) {
             const m = Math.max(nw, nh);
             nw = m; nh = m;
+          }
+          // Narrowing a labeled shape can force its label to wrap onto more
+          // lines than the current height fits — grow (never shrink here;
+          // that's onLabelTextChange's job when the text itself changes) to
+          // keep the label from overflowing past the box while resizing.
+          if (activeEl.label && LABELABLE_TYPES.includes(activeEl.type) && affectsX) {
+            const labelFontSize = activeEl.labelFontSize || 16;
+            const wrapped = wrapLabelLines(activeEl.label, labelFontSize, Math.max(1, nw - LABEL_PADDING * 2));
+            const lineHeight = labelFontSize * 1.35;
+            const neededH = Math.max(lineHeight, wrapped.length * lineHeight) + LABEL_PADDING * 2;
+            nh = Math.max(nh, neededH);
           }
           const anchorXY = (w, hgt) =>
             e.altKey
@@ -1859,12 +1981,12 @@ export default function Whiteboard({ board, boardList }) {
             if (bestV) {
               if (h.includes("e")) nw += bestV.delta;
               else if (h.includes("w")) nw -= bestV.delta;
-              nw = Math.max(4, nw);
+              nw = Math.max(minW, nw);
             }
             if (bestH) {
               if (h.includes("s")) nh += bestH.delta;
               else if (h.includes("n")) nh -= bestH.delta;
-              nh = Math.max(4, nh);
+              nh = Math.max(minH, nh);
             }
             if (g.vertical.length || g.horizontal.length) {
               guides = g;
@@ -2629,7 +2751,7 @@ export default function Whiteboard({ board, boardList }) {
                 onPointerLeave={() => setHoveredElementId((h) => (h === el.id ? null : h))}
                 style={{ cursor: tool === "select" ? "move" : "inherit" }}
               >
-                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} onLabelDoubleClick={(target) => { if (toolRef.current === "select") startLabelEdit(target); }} isSelected={selectedIds.includes(el.id)} elbowStartSide={elbowStartSide} elbowEndSide={elbowEndSide} />
+                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} onLabelDoubleClick={(target) => { if (toolRef.current === "select") startLabelEdit(target); }} isSelected={selectedIds.includes(el.id)} elbowStartSide={elbowStartSide} elbowEndSide={elbowEndSide} canvasReady={canvasReady} />
               </g>
             );
           })}
@@ -2749,6 +2871,7 @@ export default function Whiteboard({ board, boardList }) {
           style={{
             position: "absolute", left: worldToScreen(editingText.x, editingText.y).x, top: worldToScreen(editingText.x, editingText.y).y,
             fontFamily: "'Kalam', cursive", fontSize: editingText.fontSize * zoom, lineHeight: 1.35, color: editingText.stroke,
+            textAlign: (editingText.isNew ? editingText.align : elements.find((el) => el.id === editingText.id)?.align) || "left",
             background: "transparent", border: "none", outline: "1px dashed #4C5FF7", outlineOffset: 4, resize: "none", padding: 0,
             minWidth: 60, minHeight: editingText.fontSize * zoom * 1.4,
             width: Math.max(120, measureText(editingText.text || " ", editingText.fontSize).width * zoom),
@@ -2758,23 +2881,29 @@ export default function Whiteboard({ board, boardList }) {
         />
       )}
 
-      {editingLabel && (
-        <textarea
-          ref={labelTextareaRef}
-          value={editingLabel.text}
-          onChange={(e) => onLabelTextChange(e.target.value)}
-          onBlur={() => finishLabelEdit(true)}
-          onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Escape") { e.currentTarget.blur(); finishLabelEdit(false); } }}
-          style={{
-            position: "absolute", left: worldToScreen(editingLabel.x, editingLabel.y).x, top: worldToScreen(editingLabel.x, editingLabel.y).y,
-            width: editingLabel.w * zoom, height: editingLabel.h * zoom, boxSizing: "border-box",
-            fontFamily: "'Kalam', cursive", fontSize: editingLabel.fontSize * zoom, lineHeight: `${editingLabel.fontSize * zoom * 1.3}px`, color: editingLabel.stroke,
-            textAlign: "center", background: "transparent", border: "1px dashed #4C5FF7", resize: "none", outline: "none",
-            padding: `${Math.max(0, (editingLabel.h * zoom - editingLabel.text.split("\n").length * editingLabel.fontSize * zoom * 1.3) / 2)}px 4px`,
-            overflow: "hidden",
-          }}
-        />
-      )}
+      {editingLabel && (() => {
+        const liveAlign = elements.find((el) => el.id === editingLabel.id)?.labelAlign || "center";
+        const wrapped = wrapLabelLines(editingLabel.text, editingLabel.fontSize, Math.max(1, editingLabel.w - LABEL_PADDING * 2));
+        const lineHeightPx = editingLabel.fontSize * zoom * 1.35;
+        return (
+          <textarea
+            ref={labelTextareaRef}
+            value={editingLabel.text}
+            onChange={(e) => onLabelTextChange(e.target.value)}
+            onBlur={() => finishLabelEdit(true)}
+            onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Escape") { e.currentTarget.blur(); finishLabelEdit(false); } }}
+            style={{
+              position: "absolute", left: worldToScreen(editingLabel.x, editingLabel.y).x, top: worldToScreen(editingLabel.x, editingLabel.y).y,
+              width: editingLabel.w * zoom, height: editingLabel.h * zoom, boxSizing: "border-box",
+              fontFamily: "'Kalam', cursive", fontSize: editingLabel.fontSize * zoom, lineHeight: `${lineHeightPx}px`, color: editingLabel.stroke,
+              textAlign: liveAlign, background: "transparent", border: "1px dashed #4C5FF7", resize: "none", outline: "none",
+              wordBreak: "break-word", overflowWrap: "break-word",
+              padding: `${Math.max(0, (editingLabel.h * zoom - wrapped.length * lineHeightPx) / 2)}px ${LABEL_PADDING * zoom}px`,
+              overflow: "hidden",
+            }}
+          />
+        );
+      })()}
 
       {linkDraft && (
         <div onPointerDown={(e) => e.stopPropagation()}
@@ -3025,6 +3154,24 @@ export default function Whiteboard({ board, boardList }) {
             </div>
           )}
 
+          {effectiveType === "text" && (
+            <div>
+              <div className="panel-label">Align</div>
+              <div style={{ display: "flex", gap: 4 }}>
+                {TEXT_ALIGNS.map((a) => (
+                  <button key={a.value} className={`seg-btn${(style.align || "left") === a.value ? " on" : ""}`} onClick={() => {
+                    setStyle((s) => ({ ...s, align: a.value }));
+                    if (selectedIdsRef.current.length > 0) {
+                      beginChange();
+                      setElements((prev) => prev.map((el) => (selectedIdsRef.current.includes(el.id) && el.type === "text" ? { ...el, align: a.value } : el)));
+                      endChange();
+                    }
+                  }}><a.icon size={14} /></button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {singleSelected && ["rectangle", "diamond", "ellipse"].includes(singleSelected.type) && singleSelected.label && (
             <div>
               <div className="panel-label">Label size</div>
@@ -3035,12 +3182,27 @@ export default function Whiteboard({ board, boardList }) {
                     setElements((prev) =>
                       prev.map((el) => {
                         if (el.id !== singleSelected.id) return el;
-                        const grown = growBoxForLabel({ x: el.x, y: el.y, w: el.w, h: el.h }, el.label, f.value);
-                        return { ...el, labelFontSize: f.value, x: grown.x, y: grown.y, w: grown.w, h: grown.h };
+                        const fitted = fitLabelBoxHeight({ x: el.x, y: el.y, w: el.w, h: el.h }, el.label, f.value);
+                        return { ...el, labelFontSize: f.value, x: fitted.x, y: fitted.y, w: fitted.w, h: fitted.h };
                       })
                     );
                     endChange();
                   }}>{f.label}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {singleSelected && ["rectangle", "diamond", "ellipse"].includes(singleSelected.type) && singleSelected.label && (
+            <div>
+              <div className="panel-label">Label align</div>
+              <div style={{ display: "flex", gap: 4 }}>
+                {TEXT_ALIGNS.map((a) => (
+                  <button key={a.value} className={`seg-btn${(singleSelected.labelAlign || "center") === a.value ? " on" : ""}`} onClick={() => {
+                    beginChange();
+                    setElements((prev) => prev.map((el) => (el.id === singleSelected.id ? { ...el, labelAlign: a.value } : el)));
+                    endChange();
+                  }}><a.icon size={14} /></button>
                 ))}
               </div>
             </div>
