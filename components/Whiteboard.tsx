@@ -138,14 +138,38 @@ const EDGE_TYPES = ["rectangle", "diamond"];
 const EDGES = [{ label: "Sharp", value: "sharp" }, { label: "Round", value: "round" }];
 const ARROW_TYPES = [{ label: "Straight", value: "straight" }, { label: "Elbow", value: "elbow" }];
 
-// startAxis/endAxis ('h' | 'v'), when known from an actual shape binding,
-// say which side of that shape the point exits/enters from — so the bend
-// matches the side that actually faces the other shape rather than being
-// re-guessed from the raw endpoint delta (which can disagree with the
-// binding near a 45-degree relative position).
-function elbowPoints(p1, p2, startAxis, endAxis) {
-  if (startAxis && endAxis) {
+// Minimum distance a DEFAULT (auto-computed) elbow path extends past a
+// bound shape's edge before it's allowed to bend — without this, two
+// endpoints exiting the same-facing side (e.g. both bottoms, as in a
+// loop-around connector) cross over at roughly the midpoint of two
+// already-tiny exit offsets, hugging both shapes with almost no visible
+// breathing room. This only affects the initial route; a user can still
+// drag any segment/waypoint closer to a shape afterward.
+const ELBOW_CLEARANCE = 32;
+// startSide/endSide ('l'|'r'|'t'|'b'), when known from an actual shape
+// binding, say which side of that shape the point exits/enters from — so
+// the bend matches the side that actually faces the other shape rather
+// than being re-guessed from the raw endpoint delta (which can disagree
+// with the binding near a 45-degree relative position).
+function elbowPoints(p1, p2, startSide, endSide) {
+  if (startSide && endSide) {
+    const startAxis = SIDE_TO_AXIS[startSide], endAxis = SIDE_TO_AXIS[endSide];
     if (startAxis === endAxis) {
+      if (startSide === endSide) {
+        // Same shape-relative side facing the same direction — a plain
+        // midpoint crossover would sit right on top of both shapes since
+        // the two exit offsets are nearly identical. Extend past whichever
+        // exit point is furthest out instead, so the crossing segment
+        // clears both shapes with real (not near-zero) spacing.
+        if (startAxis === "h") {
+          const sign = startSide === "r" ? 1 : -1;
+          const crossX = sign > 0 ? Math.max(p1.x, p2.x) + ELBOW_CLEARANCE : Math.min(p1.x, p2.x) - ELBOW_CLEARANCE;
+          return [p1, { x: crossX, y: p1.y }, { x: crossX, y: p2.y }, p2];
+        }
+        const sign = startSide === "b" ? 1 : -1;
+        const crossY = sign > 0 ? Math.max(p1.y, p2.y) + ELBOW_CLEARANCE : Math.min(p1.y, p2.y) - ELBOW_CLEARANCE;
+        return [p1, { x: p1.x, y: crossY }, { x: p2.x, y: crossY }, p2];
+      }
       if (startAxis === "h") {
         const midX = p1.x + (p2.x - p1.x) / 2;
         return [p1, { x: midX, y: p1.y }, { x: midX, y: p2.y }, p2];
@@ -205,8 +229,9 @@ function collectElbowObstacles(elements, arrowEl) {
 // (Dijkstra over (node, incoming-direction) states) so the result prefers
 // the fewest bends, like Excalidraw's elbow routing. Falls back to the cheap
 // elbowPoints() when there are no relevant obstacles or the search fails.
-function computeElbowRoute(p1, p2, startAxis, endAxis, obstacles) {
-  const fallback = () => elbowPoints(p1, p2, startAxis, endAxis);
+function computeElbowRoute(p1, p2, startSide, endSide, obstacles) {
+  const startAxis = SIDE_TO_AXIS[startSide], endAxis = SIDE_TO_AXIS[endSide];
+  const fallback = () => elbowPoints(p1, p2, startSide, endSide);
   if (!obstacles || obstacles.length === 0) return fallback();
 
   const PAD = 12;
@@ -820,10 +845,10 @@ function updateBoundArrows(elements, updatedIds) {
     if (el.arrowType === "elbow" && el.manuallyRouted !== true) {
       const startTarget = startBinding && byId.get(startBinding.elementId);
       const endTarget = endBinding && byId.get(endBinding.elementId);
-      const startAxis = startTarget ? SIDE_TO_AXIS[startBinding.side] : undefined;
-      const endAxis = endTarget ? SIDE_TO_AXIS[endBinding.side] : undefined;
+      const startSide = startTarget ? startBinding.side : undefined;
+      const endSide = endTarget ? endBinding.side : undefined;
       const obstacles = collectElbowObstacles(elements, el);
-      const route = computeElbowRoute(p0, p1, startAxis, endAxis, obstacles);
+      const route = computeElbowRoute(p0, p1, startSide, endSide, obstacles);
       elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
     } else if (el.arrowType === "elbow" && elbowWaypoints && elbowWaypoints.length > 0) {
       // Manually-routed: the endpoint(s) above just got recomputed to track
@@ -863,10 +888,10 @@ function rerouteAllElbowArrows(elements) {
     const [p0, p1] = el.points;
     const startTarget = el.startBinding && byId.get(el.startBinding.elementId);
     const endTarget = el.endBinding && byId.get(el.endBinding.elementId);
-    const startAxis = startTarget ? SIDE_TO_AXIS[el.startBinding.side] : undefined;
-    const endAxis = endTarget ? SIDE_TO_AXIS[el.endBinding.side] : undefined;
+    const startSide = startTarget ? el.startBinding.side : undefined;
+    const endSide = endTarget ? el.endBinding.side : undefined;
     const obstacles = collectElbowObstacles(elements, el);
-    const route = computeElbowRoute(p0, p1, startAxis, endAxis, obstacles);
+    const route = computeElbowRoute(p0, p1, startSide, endSide, obstacles);
     const elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
     return { ...el, elbowWaypoints };
   });
@@ -1000,7 +1025,7 @@ function ShapeLabel({ el, hidden }) {
     </text>
   );
 }
-export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick, isSelected = false, elbowStartAxis = undefined, elbowEndAxis = undefined }) {
+export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick, isSelected = false, elbowStartSide = undefined, elbowEndSide = undefined }) {
   const { type, seed, roughness } = el;
   if (type === "rectangle") {
     const pts = [[el.x, el.y], [el.x + el.w, el.y], [el.x + el.w, el.y + el.h], [el.x, el.y + el.h]];
@@ -1068,7 +1093,7 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const [p1, p2] = el.points;
     const isElbow = type === "arrow" && el.arrowType === "elbow";
     const elbowPts = isElbow
-      ? (el.elbowWaypoints && el.elbowWaypoints.length ? [p1, ...el.elbowWaypoints, p2] : elbowPoints(p1, p2, elbowStartAxis, elbowEndAxis))
+      ? (el.elbowWaypoints && el.elbowWaypoints.length ? [p1, ...el.elbowWaypoints, p2] : elbowPoints(p1, p2, elbowStartSide, elbowEndSide))
       : null;
     const d = isElbow
       ? sketchyPath(elbowPts.map((p) => [p.x, p.y]), seed, roughness, false)
@@ -1394,7 +1419,14 @@ export default function Whiteboard({ board, boardList }) {
   const beginChange = useCallback(() => {
     if (snapshotRef.current !== null) {
       console.warn("beginChange called while a previous change was still open — flushing it to avoid losing history");
-      setPast((p) => [...p.slice(-49), snapshotRef.current]);
+      // Capture the flushed snapshot into a local BEFORE reassigning the ref
+      // below — setPast's updater is queued and only runs later (during
+      // React's render pass), and by then it'd read whatever snapshotRef.current
+      // has been reassigned to in the meantime, not what it held right now.
+      // Closing over a local (never reassigned) instead of the ref itself
+      // avoids that race.
+      const flushed = snapshotRef.current;
+      setPast((p) => [...p.slice(-49), flushed]);
       setFuture([]);
     }
     // Read straight from the ref (kept in sync via its own effect) rather than
@@ -1407,7 +1439,12 @@ export default function Whiteboard({ board, boardList }) {
   }, []);
   const endChange = useCallback(() => {
     if (snapshotRef.current !== null) {
-      setPast((p) => [...p.slice(-49), snapshotRef.current]);
+      // Same local-capture fix as above: setPast's updater runs later and
+      // would otherwise read snapshotRef.current AFTER it's nulled out on
+      // the next line, pushing null (and every future undo would then
+      // restore `[]`, wiping the canvas) instead of the real snapshot.
+      const snapshot = snapshotRef.current;
+      setPast((p) => [...p.slice(-49), snapshot]);
       setFuture([]);
       snapshotRef.current = null;
     }
@@ -1894,10 +1931,10 @@ export default function Whiteboard({ board, boardList }) {
                 }
                 let elbowWaypoints = null;
                 if (e.arrowType === "elbow") {
-                  const startAxis = startTarget ? SIDE_TO_AXIS[startBinding.side] : undefined;
-                  const endAxis = endTarget ? SIDE_TO_AXIS[endBinding.side] : undefined;
+                  const startSide = startTarget ? startBinding.side : undefined;
+                  const endSide = endTarget ? endBinding.side : undefined;
                   const obstacles = collectElbowObstacles(prev, { ...e, startBinding, endBinding });
-                  const route = computeElbowRoute(p0, p1, startAxis, endAxis, obstacles);
+                  const route = computeElbowRoute(p0, p1, startSide, endSide, obstacles);
                   elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
                 }
                 return { ...e, points: [p0, p1], startBinding, endBinding, elbowWaypoints, manuallyRouted: false };
@@ -1959,10 +1996,10 @@ export default function Whiteboard({ board, boardList }) {
                   manuallyRouted = false;
                   const startTarget = startBinding ? prev.find((p2) => p2.id === startBinding.elementId) : null;
                   const endTarget = endBinding ? prev.find((p2) => p2.id === endBinding.elementId) : null;
-                  const startAxis = startTarget ? SIDE_TO_AXIS[startBinding.side] : undefined;
-                  const endAxis = endTarget ? SIDE_TO_AXIS[endBinding.side] : undefined;
+                  const startSide = startTarget ? startBinding.side : undefined;
+                  const endSide = endTarget ? endBinding.side : undefined;
                   const obstacles = collectElbowObstacles(prev, { ...e, startBinding, endBinding });
-                  const route = computeElbowRoute(pts[0], pts[1], startAxis, endAxis, obstacles);
+                  const route = computeElbowRoute(pts[0], pts[1], startSide, endSide, obstacles);
                   elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
                 }
                 return { ...e, points: pts, startBinding, endBinding, elbowWaypoints, manuallyRouted };
@@ -2576,12 +2613,12 @@ export default function Whiteboard({ board, boardList }) {
         <g id="content-layer" transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
           {(elements || []).map((el) => {
             if (editingText && editingText.id === el.id) return null;
-            let elbowStartAxis, elbowEndAxis;
+            let elbowStartSide, elbowEndSide;
             if (el.type === "arrow" && el.arrowType === "elbow") {
               const startTarget = el.startBinding && elements.find((e) => e.id === el.startBinding.elementId);
               const endTarget = el.endBinding && elements.find((e) => e.id === el.endBinding.elementId);
-              elbowStartAxis = startTarget ? SIDE_TO_AXIS[el.startBinding.side] : undefined;
-              elbowEndAxis = endTarget ? SIDE_TO_AXIS[el.endBinding.side] : undefined;
+              elbowStartSide = startTarget ? el.startBinding.side : undefined;
+              elbowEndSide = endTarget ? el.endBinding.side : undefined;
             }
             return (
               <g
@@ -2592,7 +2629,7 @@ export default function Whiteboard({ board, boardList }) {
                 onPointerLeave={() => setHoveredElementId((h) => (h === el.id ? null : h))}
                 style={{ cursor: tool === "select" ? "move" : "inherit" }}
               >
-                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} onLabelDoubleClick={(target) => { if (toolRef.current === "select") startLabelEdit(target); }} isSelected={selectedIds.includes(el.id)} elbowStartAxis={elbowStartAxis} elbowEndAxis={elbowEndAxis} />
+                <ShapeSvg el={el} theme={theme} isEmbedInteracting={interactingEmbedId === el.id} hideLabel={editingLabel?.id === el.id} onLabelDoubleClick={(target) => { if (toolRef.current === "select") startLabelEdit(target); }} isSelected={selectedIds.includes(el.id)} elbowStartSide={elbowStartSide} elbowEndSide={elbowEndSide} />
               </g>
             );
           })}
