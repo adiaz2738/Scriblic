@@ -166,7 +166,6 @@ const ALIGNABLE_TYPES = ["rectangle", "diamond", "ellipse", "text"];
 const LABELABLE_TYPES = ["rectangle", "diamond", "ellipse"];
 const EDGE_TYPES = ["rectangle", "diamond"];
 const EDGES = [{ label: "Sharp", value: "sharp" }, { label: "Round", value: "round" }];
-const ARROW_TYPES = [{ label: "Straight", value: "straight" }, { label: "Elbow", value: "elbow" }];
 
 // Minimum distance a DEFAULT (auto-computed) elbow path extends past a
 // bound shape's edge before it's allowed to bend — without this, two
@@ -181,7 +180,17 @@ const ELBOW_CLEARANCE = 32;
 // the bend matches the side that actually faces the other shape rather
 // than being re-guessed from the raw endpoint delta (which can disagree
 // with the binding near a 45-degree relative position).
+//
+// Every arrow is routed through here (there's no separate "straight" type
+// any more) — a direct, unbent line is just the special case where the
+// route naturally needs zero bends: neither end is bound to anything (a
+// freely-drawn arrow keeps whatever angle it was drawn at), or both ends
+// are bound on the same axis and already line up, so a "bend" would only
+// insert redundant collinear points that render as extra sketchy wobble
+// instead of one clean segment.
+const STRAIGHT_EPS = 0.5;
 function elbowPoints(p1, p2, startSide, endSide) {
+  if (!startSide && !endSide) return [p1, p2];
   if (startSide && endSide) {
     const startAxis = SIDE_TO_AXIS[startSide], endAxis = SIDE_TO_AXIS[endSide];
     if (startAxis === endAxis) {
@@ -201,9 +210,11 @@ function elbowPoints(p1, p2, startSide, endSide) {
         return [p1, { x: p1.x, y: crossY }, { x: p2.x, y: crossY }, p2];
       }
       if (startAxis === "h") {
+        if (Math.abs(p1.y - p2.y) < STRAIGHT_EPS) return [p1, p2];
         const midX = p1.x + (p2.x - p1.x) / 2;
         return [p1, { x: midX, y: p1.y }, { x: midX, y: p2.y }, p2];
       }
+      if (Math.abs(p1.x - p2.x) < STRAIGHT_EPS) return [p1, p2];
       const midY = p1.y + (p2.y - p1.y) / 2;
       return [p1, { x: p1.x, y: midY }, { x: p2.x, y: midY }, p2];
     }
@@ -260,6 +271,10 @@ function collectElbowObstacles(elements, arrowEl) {
 // the fewest bends, like Excalidraw's elbow routing. Falls back to the cheap
 // elbowPoints() when there are no relevant obstacles or the search fails.
 function computeElbowRoute(p1, p2, startSide, endSide, obstacles) {
+  // Neither end bound to anything — a freely-drawn arrow keeps exactly the
+  // angle it was drawn at, never obstacle-routed or auto-bent, regardless
+  // of what happens to sit between its two points.
+  if (!startSide && !endSide) return [p1, p2];
   const startAxis = SIDE_TO_AXIS[startSide], endAxis = SIDE_TO_AXIS[endSide];
   const fallback = () => elbowPoints(p1, p2, startSide, endSide);
   if (!obstacles || obstacles.length === 0) return fallback();
@@ -675,50 +690,12 @@ function hitTestPoint(el, x, y, threshold) {
   }
   return false;
 }
-function rectBoundaryPoint(bbox, fromX, fromY) {
-  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
-  const dx = fromX - cx, dy = fromY - cy;
-  if (dx === 0 && dy === 0) return { x: cx, y: cy };
-  const scaleX = (bbox.w / 2) / (Math.abs(dx) || 1e-6);
-  const scaleY = (bbox.h / 2) / (Math.abs(dy) || 1e-6);
-  const scale = Math.min(scaleX, scaleY);
-  return { x: cx + dx * scale, y: cy + dy * scale };
-}
-function diamondBoundaryPoint(bbox, fromX, fromY) {
-  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
-  const dx = fromX - cx, dy = fromY - cy;
-  const denom = Math.abs(dx) / (bbox.w / 2 || 1e-6) + Math.abs(dy) / (bbox.h / 2 || 1e-6);
-  const scale = denom === 0 ? 0 : 1 / denom;
-  return { x: cx + dx * scale, y: cy + dy * scale };
-}
-function ellipseBoundaryPoint(bbox, fromX, fromY) {
-  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
-  const rx = bbox.w / 2, ry = bbox.h / 2;
-  const dx = fromX - cx, dy = fromY - cy;
-  const denom = Math.sqrt((dx * dx) / (rx * rx || 1e-6) + (dy * dy) / (ry * ry || 1e-6));
-  const scale = denom === 0 ? 0 : 1 / denom;
-  return { x: cx + dx * scale, y: cy + dy * scale };
-}
 // Once an endpoint is bound, its elbow exit axis must follow the COMMITTED
 // side, not a fresh re-derivation from the other endpoint's position —
 // otherwise a manually-chosen side (e.g. bottom) could stay pinned for the
 // endpoint's actual position while the routing axis independently flips to
 // "horizontal", producing a mismatched/kinked route.
 const SIDE_TO_AXIS = { l: "h", r: "h", t: "v", b: "v" };
-const BIND_FOCUS_SNAP_THRESHOLD = 0.08;
-// `focus` (-1..1) records where along the attached edge a bound endpoint
-// landed, so it can be re-derived from the shape's current bbox as it
-// moves/resizes instead of sliding to a new angle-derived point each time.
-function computeBindFocus(bbox, boundaryPt) {
-  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
-  const dx = boundaryPt.x - cx, dy = boundaryPt.y - cy;
-  const nx = Math.abs(dx) / (bbox.w / 2 || 1e-6);
-  const ny = Math.abs(dy) / (bbox.h / 2 || 1e-6);
-  let focus = nx >= ny ? dy / (bbox.h / 2 || 1e-6) : dx / (bbox.w / 2 || 1e-6);
-  focus = Math.max(-1, Math.min(1, focus));
-  if (Math.abs(focus) < BIND_FOCUS_SNAP_THRESHOLD) focus = 0;
-  return focus;
-}
 // Which specific side ('l'/'r'/'t'/'b') of a bbox faces a given point —
 // combines the dominant-axis test with the sign of the offset so bindings
 // can detect when the facing side has actually changed.
@@ -730,33 +707,17 @@ function computeBindSide(bbox, otherX, otherY) {
   if (nx >= ny) return dx >= 0 ? "r" : "l";
   return dy >= 0 ? "b" : "t";
 }
-// Picks the bind point/focus/side for a NEW binding. `dropX/dropY` must be
-// the endpoint's OWN actual drop location (not the other endpoint) — the
-// side is chosen as whichever edge of the shape is closest to where the
-// user actually released it, honoring a deliberate drop onto e.g. the
-// bottom edge even if the other shape's position would otherwise make
-// left/right the "obvious" facing side. Elbow arrows still center on that
-// side (matching Excalidraw); straight arrows keep the angle-derived focus
-// so a deliberately off-center drop is preserved.
-function getArrowBindPoint(arrowType, target, dropX, dropY, gap = 6) {
-  if (arrowType === "elbow") {
-    const bbox = getBBox(target);
-    return { point: getFocusedBindPoint(target, 0, dropX, dropY, gap), focus: 0, side: computeBindSide(bbox, dropX, dropY) };
-  }
-  return getBindPointWithFocus(target, dropX, dropY, gap);
-}
-function getBindPointWithFocus(el, fromX, fromY, gap = 6) {
-  const bbox = getBBox(el);
-  const pt =
-    el.type === "diamond" ? diamondBoundaryPoint(bbox, fromX, fromY) :
-    el.type === "ellipse" ? ellipseBoundaryPoint(bbox, fromX, fromY) :
-    rectBoundaryPoint(bbox, fromX, fromY); // rectangle, image, embed, link
-  const cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
-  const dx = pt.x - cx, dy = pt.y - cy;
-  const len = Math.hypot(dx, dy) || 1;
-  const focus = computeBindFocus(bbox, pt);
-  const side = computeBindSide(bbox, fromX, fromY);
-  return { point: { x: pt.x + (dx / len) * gap, y: pt.y + (dy / len) * gap }, focus, side };
+// Picks the bind point/side for a NEW binding. `dropX/dropY` must be the
+// endpoint's OWN actual drop location (not the other endpoint) — the side
+// is chosen as whichever edge of the shape is closest to where the user
+// actually released it, honoring a deliberate drop onto e.g. the bottom
+// edge even if the other shape's position would otherwise make left/right
+// the "obvious" facing side. Every arrow centers on that side (focus 0,
+// matching Excalidraw's elbow arrows) — there's no more "off-center
+// straight arrow" mode.
+function getArrowBindPoint(target, dropX, dropY, gap = 6) {
+  const bbox = getBBox(target);
+  return { point: getFocusedBindPoint(target, 0, dropX, dropY, gap), focus: 0, side: computeBindSide(bbox, dropX, dropY) };
 }
 const OPPOSITE_SIDE = { l: "r", r: "l", t: "b", b: "t" };
 // Projects onto an explicitly-given side/focus, independent of any other
@@ -825,23 +786,21 @@ function centerOf(el) {
 // endpoint has swung around to the exact OPPOSITE side — the one case
 // where staying on the committed side would force the arrow to visually
 // cut back through the shape's own body to reach it.
-// Elbow arrows always route from the dead center of the (kept) side (like
-// Excalidraw), so `forceCenter` skips the angle-derived focus entirely —
-// an angle-derived focus would otherwise drift back toward a corner as
-// soon as the other shape isn't perfectly level/aligned.
-function getBoundEndpoint(target, binding, otherX, otherY, gap = 6, forceCenter = false) {
+// Every arrow always routes from the dead center of the (kept) side (like
+// Excalidraw's elbow arrows) — an angle-derived focus would otherwise
+// drift back toward a corner as soon as the other shape isn't perfectly
+// level/aligned, which is exactly the "clings to corners" look this
+// avoids.
+function getBoundEndpoint(target, binding, otherX, otherY, gap = 6) {
   const bbox = getBBox(target);
   const naiveSide = computeBindSide(bbox, otherX, otherY);
   const invalid = OPPOSITE_SIDE[binding.side] === naiveSide;
   if (invalid) {
-    const bound = forceCenter
-      ? { point: getFocusedBindPoint(target, 0, otherX, otherY, gap), focus: 0, side: naiveSide }
-      : getBindPointWithFocus(target, otherX, otherY, gap);
-    return { point: bound.point, binding: { elementId: binding.elementId, focus: bound.focus, side: bound.side } };
+    const point = getFocusedBindPoint(target, 0, otherX, otherY, gap);
+    return { point, binding: { elementId: binding.elementId, focus: 0, side: naiveSide } };
   }
-  const focus = forceCenter ? 0 : (binding.focus || 0);
-  const point = getBindPointForSide(target, binding.side, focus, gap);
-  return { point, binding: forceCenter && binding.focus !== 0 ? { ...binding, focus: 0 } : binding };
+  const point = getBindPointForSide(target, binding.side, 0, gap);
+  return { point, binding: binding.focus !== 0 ? { ...binding, focus: 0 } : binding };
 }
 function updateBoundArrows(elements, updatedIds) {
   const byId = new Map(elements.map((el) => [el.id, el]));
@@ -850,14 +809,13 @@ function updateBoundArrows(elements, updatedIds) {
     const startBoundUpdated = el.startBinding && updatedIds.has(el.startBinding.elementId);
     const endBoundUpdated = el.endBinding && updatedIds.has(el.endBinding.elementId);
     if (!startBoundUpdated && !endBoundUpdated) return el;
-    const forceCenter = el.arrowType === "elbow";
     let [p0, p1] = el.points;
     let startBinding = el.startBinding, endBinding = el.endBinding;
     if (startBinding) {
       const target = byId.get(startBinding.elementId);
       if (target) {
         const other = endBinding ? centerOf(byId.get(endBinding.elementId) || target) : p1;
-        const result = getBoundEndpoint(target, startBinding, other.x, other.y, 6, forceCenter);
+        const result = getBoundEndpoint(target, startBinding, other.x, other.y);
         p0 = result.point;
         startBinding = result.binding;
       }
@@ -866,13 +824,13 @@ function updateBoundArrows(elements, updatedIds) {
       const target = byId.get(endBinding.elementId);
       if (target) {
         const other = startBinding ? centerOf(byId.get(startBinding.elementId) || target) : p0;
-        const result = getBoundEndpoint(target, endBinding, other.x, other.y, 6, forceCenter);
+        const result = getBoundEndpoint(target, endBinding, other.x, other.y);
         p1 = result.point;
         endBinding = result.binding;
       }
     }
     let elbowWaypoints = el.elbowWaypoints;
-    if (el.arrowType === "elbow" && el.manuallyRouted !== true) {
+    if (el.manuallyRouted !== true) {
       const startTarget = startBinding && byId.get(startBinding.elementId);
       const endTarget = endBinding && byId.get(endBinding.elementId);
       const startSide = startTarget ? startBinding.side : undefined;
@@ -880,7 +838,7 @@ function updateBoundArrows(elements, updatedIds) {
       const obstacles = collectElbowObstacles(elements, el);
       const route = computeElbowRoute(p0, p1, startSide, endSide, obstacles);
       elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
-    } else if (el.arrowType === "elbow" && elbowWaypoints && elbowWaypoints.length > 0) {
+    } else if (elbowWaypoints && elbowWaypoints.length > 0) {
       // Manually-routed: the endpoint(s) above just got recomputed to track
       // the moved shape, but the interior waypoints are otherwise left
       // untouched — re-anchor only the waypoint adjacent to whichever
@@ -903,18 +861,18 @@ function updateBoundArrows(elements, updatedIds) {
     return { ...el, points: [p0, p1], startBinding, endBinding, elbowWaypoints };
   });
 }
-// updateBoundArrows only re-routes an elbow arrow when one of ITS OWN bound
+// updateBoundArrows only re-routes an arrow when one of ITS OWN bound
 // shapes is in the moved/updated set — so an unrelated third shape moving
 // into (or out of) the space between two already-connected shapes never
 // triggers a re-route, leaving the arrow cutting through the new obstacle
-// forever. This re-checks every non-manually-routed elbow arrow on the
-// board against the current obstacle layout, regardless of what moved.
-// Called once at drag/creation finalize (not on every pointermove frame)
-// to keep live dragging smooth.
+// forever. This re-checks every non-manually-routed arrow on the board
+// against the current obstacle layout, regardless of what moved. Called
+// once at drag/creation finalize (not on every pointermove frame) to keep
+// live dragging smooth.
 function rerouteAllElbowArrows(elements) {
   const byId = new Map(elements.map((el) => [el.id, el]));
   return elements.map((el) => {
-    if (el.type !== "arrow" || el.arrowType !== "elbow" || el.manuallyRouted === true) return el;
+    if (el.type !== "arrow" || el.manuallyRouted === true) return el;
     const [p0, p1] = el.points;
     const startTarget = el.startBinding && byId.get(el.startBinding.elementId);
     const endTarget = el.endBinding && byId.get(el.endBinding.elementId);
@@ -943,7 +901,7 @@ function clearDanglingBindings(elements) {
       ...el,
       startBinding: startDangling ? null : el.startBinding,
       endBinding: endDangling ? null : el.endBinding,
-      manuallyRouted: el.arrowType === "elbow" ? true : el.manuallyRouted,
+      manuallyRouted: true,
     };
   });
 }
@@ -1059,7 +1017,7 @@ function fitLabelBoxHeight(box, text, fontSize) {
 function createShapeElement(type, x, y, style) {
   const base = { id: genId(), type, stroke: style.stroke, fill: style.fill, strokeWidth: style.strokeWidth, roughness: style.roughness, opacity: style.opacity, seed: Math.floor(Math.random() * 100000) + 1 };
   if (type === "rectangle" || type === "diamond" || type === "ellipse") return { ...base, x, y, w: 0, h: 0, edges: style.edges };
-  if (type === "arrow") return { ...base, points: [{ x, y }, { x, y }], arrowType: style.arrowType, elbowWaypoints: null, manuallyRouted: false };
+  if (type === "arrow") return { ...base, points: [{ x, y }, { x, y }], elbowWaypoints: null, manuallyRouted: false };
   if (type === "line") return { ...base, points: [{ x, y }, { x, y }] };
   if (type === "freehand") return { ...base, points: [{ x, y }] };
   return base;
@@ -1178,16 +1136,29 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
   }
   if (type === "line" || type === "arrow") {
     const [p1, p2] = el.points;
-    const isElbow = type === "arrow" && el.arrowType === "elbow";
-    const elbowPts = isElbow
+    const isArrow = type === "arrow";
+    // Every arrow is routed the same way now (no more separate "straight"
+    // vs "elbow" type) — elbowPoints/el.elbowWaypoints decide per-arrow
+    // whether a bend is actually needed. `isBentArrow` is true only when
+    // that routing produced more than the 2 true endpoints.
+    const routePts = isArrow
       ? (el.elbowWaypoints && el.elbowWaypoints.length ? [p1, ...el.elbowWaypoints, p2] : elbowPoints(p1, p2, elbowStartSide, elbowEndSide))
       : null;
-    const d = isElbow
-      ? sketchyPath(elbowPts.map((p) => [p.x, p.y]), seed, roughness, false)
-      : sketchyPath([[p1.x, p1.y], [p2.x, p2.y]], seed, roughness, false);
+    const isBentArrow = isArrow && routePts.length > 2;
+    // sketchyPath's hand-drawn jitter draws every segment as a quadratic
+    // bezier through a randomly-offset midpoint — the intended sketchy look
+    // for shapes/lines and genuinely bent arrows, but it reads as an
+    // unwanted kink on what's supposed to be a clean, precise 2-point
+    // connector. Bypass that jitter specifically for an arrow whose route
+    // resolved to a direct line; plain lines are untouched.
+    const d = isBentArrow
+      ? sketchyPath(routePts.map((p) => [p.x, p.y]), seed, roughness, false)
+      : isArrow
+        ? `M ${p1.x.toFixed(2)} ${p1.y.toFixed(2)} L ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`
+        : sketchyPath([[p1.x, p1.y], [p2.x, p2.y]], seed, roughness, false);
     let head = null;
     if (type === "arrow") {
-      const [lastFrom, lastTo] = isElbow ? elbowPts.slice(-2) : [p1, p2];
+      const [lastFrom, lastTo] = isBentArrow ? routePts.slice(-2) : [p1, p2];
       const angle = Math.atan2(lastTo.y - lastFrom.y, lastTo.x - lastFrom.x);
       const len = 14 + el.strokeWidth * 2;
       const a1 = angle + Math.PI - 0.4, a2 = angle + Math.PI + 0.4;
@@ -1279,7 +1250,7 @@ export default function Whiteboard({ board, boardList }) {
   const [canvasBg, setCanvasBg] = useState(board.canvasBg || CANVAS_BACKGROUNDS[0].value);
   const [selectedIds, setSelectedIds] = useState([]);
   const [tool, setTool] = useState("select");
-  const [style, setStyle] = useState(() => ({ stroke: defaultStrokeForBg(board.canvasBg || CANVAS_BACKGROUNDS[0].value), fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, align: "left", edges: "round", arrowType: "elbow" }));
+  const [style, setStyle] = useState(() => ({ stroke: defaultStrokeForBg(board.canvasBg || CANVAS_BACKGROUNDS[0].value), fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, align: "left", edges: "round" }));
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [marquee, setMarquee] = useState(null);
@@ -1994,7 +1965,7 @@ export default function Whiteboard({ board, boardList }) {
             wps[i + 1] = { ...b, x };
           }
           patch = { elbowWaypoints: wps };
-        } else if (activeEl && activeEl.type === "arrow" && activeEl.arrowType === "elbow" && typeof drag.handle === "object" && (drag.handle.kind === "segment-start" || drag.handle.kind === "segment-end")) {
+        } else if (activeEl && activeEl.type === "arrow" && typeof drag.handle === "object" && (drag.handle.kind === "segment-start" || drag.handle.kind === "segment-end")) {
           // Grab the segment right next to a bound endpoint — the endpoint
           // itself must stay fixed (attached to its shape), so this inserts
           // a new bend point near it instead of moving the endpoint.
@@ -2160,18 +2131,18 @@ export default function Whiteboard({ board, boardList }) {
                 let startBinding = null, endBinding = null;
                 const startTarget = findBindTarget(prev, p0.x, p0.y, e.id, 10 / zoomRef.current);
                 if (startTarget) {
-                  const bound = getArrowBindPoint(e.arrowType, startTarget, p0.x, p0.y);
+                  const bound = getArrowBindPoint(startTarget, p0.x, p0.y);
                   startBinding = { elementId: startTarget.id, focus: bound.focus, side: bound.side };
                   p0 = bound.point;
                 }
                 const endTarget = findBindTarget(prev, p1.x, p1.y, e.id, 10 / zoomRef.current);
                 if (endTarget) {
-                  const bound = getArrowBindPoint(e.arrowType, endTarget, p1.x, p1.y);
+                  const bound = getArrowBindPoint(endTarget, p1.x, p1.y);
                   endBinding = { elementId: endTarget.id, focus: bound.focus, side: bound.side };
                   p1 = bound.point;
                 }
                 let elbowWaypoints = null;
-                if (e.arrowType === "elbow") {
+                {
                   const startSide = startTarget ? startBinding.side : undefined;
                   const endSide = endTarget ? endBinding.side : undefined;
                   const obstacles = collectElbowObstacles(prev, { ...e, startBinding, endBinding });
@@ -2225,24 +2196,24 @@ export default function Whiteboard({ board, boardList }) {
                 const pts = [...e.points];
                 let newBindingObj = null;
                 if (target) {
-                  const bound = getArrowBindPoint(e.arrowType, target, point.x, point.y);
+                  const bound = getArrowBindPoint(target, point.x, point.y);
                   pts[drag.handle] = bound.point;
                   newBindingObj = { elementId: target.id, focus: bound.focus, side: bound.side };
                 }
                 const startBinding = bindKey === "startBinding" ? newBindingObj : e.startBinding;
                 const endBinding = bindKey === "endBinding" ? newBindingObj : e.endBinding;
-                let elbowWaypoints = e.elbowWaypoints;
-                let manuallyRouted = e.manuallyRouted;
-                if (e.arrowType === "elbow") {
-                  manuallyRouted = false;
-                  const startTarget = startBinding ? prev.find((p2) => p2.id === startBinding.elementId) : null;
-                  const endTarget = endBinding ? prev.find((p2) => p2.id === endBinding.elementId) : null;
-                  const startSide = startTarget ? startBinding.side : undefined;
-                  const endSide = endTarget ? endBinding.side : undefined;
-                  const obstacles = collectElbowObstacles(prev, { ...e, startBinding, endBinding });
-                  const route = computeElbowRoute(pts[0], pts[1], startSide, endSide, obstacles);
-                  elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
-                }
+                // Re-binding an endpoint always recomputes a fresh route,
+                // discarding any earlier manual reroute — that manual bend
+                // was relative to the old attachment, and may no longer make
+                // sense once the endpoint's moved to a different shape/side.
+                const manuallyRouted = false;
+                const startTarget = startBinding ? prev.find((p2) => p2.id === startBinding.elementId) : null;
+                const endTarget = endBinding ? prev.find((p2) => p2.id === endBinding.elementId) : null;
+                const startSide = startTarget ? startBinding.side : undefined;
+                const endSide = endTarget ? endBinding.side : undefined;
+                const obstacles = collectElbowObstacles(prev, { ...e, startBinding, endBinding });
+                const route = computeElbowRoute(pts[0], pts[1], startSide, endSide, obstacles);
+                const elbowWaypoints = route.length > 2 ? route.slice(1, -1) : null;
                 return { ...e, points: pts, startBinding, endBinding, elbowWaypoints, manuallyRouted };
               })
             );
@@ -2775,7 +2746,7 @@ export default function Whiteboard({ board, boardList }) {
       // bound endpoints) instead pull out a NEW bend near the shape while
       // the endpoint itself stays attached — also matching Excalidraw.
       const segmentHandles =
-        singleSelected.type === "arrow" && singleSelected.arrowType === "elbow"
+        singleSelected.type === "arrow"
           ? (() => {
               const wps = singleSelected.elbowWaypoints || [];
               const fullPts = [singleSelected.points[0], ...wps, singleSelected.points[1]];
@@ -2872,7 +2843,7 @@ export default function Whiteboard({ board, boardList }) {
           {(elements || []).map((el) => {
             if (editingText && editingText.id === el.id) return null;
             let elbowStartSide, elbowEndSide;
-            if (el.type === "arrow" && el.arrowType === "elbow") {
+            if (el.type === "arrow") {
               const startTarget = el.startBinding && elements.find((e) => e.id === el.startBinding.elementId);
               const endTarget = el.endBinding && elements.find((e) => e.id === el.endBinding.elementId);
               elbowStartSide = startTarget ? el.startBinding.side : undefined;
@@ -3398,16 +3369,6 @@ export default function Whiteboard({ board, boardList }) {
             </div>
           )}
 
-          {effectiveType === "arrow" && (
-            <div>
-              <div className="panel-label">Arrow type</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                {ARROW_TYPES.map((opt) => (
-                  <button key={opt.value} className={`seg-btn${(singleSelected ? singleSelected.arrowType : style.arrowType) === opt.value ? " on" : ""}`} style={{ width: "100%" }} onClick={() => updateSelectedStyle({ arrowType: opt.value })}>{opt.label}</button>
-                ))}
-              </div>
-            </div>
-          )}
 
           {EDGE_TYPES.includes(effectiveType) && (
             <div>
