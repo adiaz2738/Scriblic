@@ -1023,16 +1023,19 @@ function wrapLabelLines(text, fontSize, maxWidth, precise = true) {
   }
   return lines;
 }
-// Auto-fits a labeled shape's HEIGHT to however many lines its label wraps
-// into AT THE BOX'S CURRENT WIDTH — width is never touched here (it's
-// purely user-controlled via manual resize handles). Anchored at the top:
-// only the bottom edge moves, so the box grows/shrinks symmetrically as
-// text is added or removed, rather than only ever growing.
+// Grows a labeled shape's HEIGHT when its label wraps into more lines than
+// currently fit AT THE BOX'S CURRENT WIDTH — width is never touched here
+// (it's purely user-controlled via manual resize handles). Anchored at the
+// top: only the bottom edge moves, so growth always extends downward.
+// Deliberately grow-only: it never shrinks the box back down just because
+// the text got shorter — a manually-set height should stick until text
+// genuinely no longer fits it, not snap tight the moment you start typing.
 function fitLabelBoxHeight(box, text, fontSize) {
   const maxWidth = Math.max(1, box.w - LABEL_PADDING * 2);
   const lines = wrapLabelLines(text || " ", fontSize, maxWidth);
   const lineHeight = fontSize * 1.35;
-  const neededH = Math.max(lineHeight, lines.length * lineHeight) + LABEL_PADDING * 2;
+  const requiredH = Math.max(lineHeight, lines.length * lineHeight) + LABEL_PADDING * 2;
+  const neededH = Math.max(box.h, requiredH);
   if (neededH === box.h) return box;
   return { x: box.x, y: box.y, w: box.w, h: neededH };
 }
@@ -1115,12 +1118,7 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        {el.fill === "transparent" && !isSelected && !el.label && (
-          <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="none" stroke="transparent" strokeWidth={16} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "stroke", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
-        )}
-        {(el.fill !== "transparent" || isSelected || el.label) && (
-          <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
-        )}
+        <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         {el.fill !== "transparent" && (
           radius > 0
             ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
@@ -1137,12 +1135,7 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = radius > 0 ? sketchyRoundedPath(pts, seed, roughness, radius) : sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        {el.fill === "transparent" && !isSelected && !el.label && (
-          <polygon points={pts.map((p) => p.join(",")).join(" ")} fill="none" stroke="transparent" strokeWidth={16} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "stroke", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
-        )}
-        {(el.fill !== "transparent" || isSelected || el.label) && (
-          <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
-        )}
+        <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         {el.fill !== "transparent" && (
           radius > 0
             ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
@@ -1159,12 +1152,7 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     const d = sketchyPath(pts, seed, roughness, true);
     return (
       <>
-        {el.fill === "transparent" && !isSelected && !el.label && (
-          <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="none" stroke="transparent" strokeWidth={16} vectorEffect="non-scaling-stroke" style={{ pointerEvents: "stroke", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
-        )}
-        {(el.fill !== "transparent" || isSelected || el.label) && (
-          <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
-        )}
+        <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         {el.fill !== "transparent" && <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill={el.fill} stroke="none" />}
         <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
         <ShapeLabel el={el} hidden={hideLabel} canvasReady={canvasReady} />
@@ -1323,6 +1311,11 @@ export default function Whiteboard({ board, boardList }) {
   const jsonInputRef = useRef(null);
   const saveTimerRef = useRef(null);
   const isFirstRenderRef = useRef(true);
+  // Tracks whether the opacity slider is mid-drag, so the whole drag
+  // coalesces into ONE undo step instead of one per "input" event (a range
+  // slider fires many of those per drag — without this, Ctrl+Z would only
+  // undo the last imperceptible increment, not the whole gesture).
+  const opacityDragRef = useRef(false);
 
   useEffect(() => { elementsRef.current = elements; }, [elements]);
   useEffect(() => { pastRef.current = past; }, [past]);
@@ -1549,7 +1542,14 @@ export default function Whiteboard({ board, boardList }) {
     setPast(p.slice(0, -1));
     setFuture([current, ...futureRef.current]);
     setElements(prev);
-    setSelectedIds([]);
+    // Keep whatever's still selected selected (e.g. undoing an opacity or
+    // font-size change on the currently-selected shape shouldn't hide the
+    // side panel and force a re-click) — only drop ids that no longer exist
+    // in the reverted state (e.g. undoing the shape's own creation).
+    setSelectedIds((ids) => {
+      const survivingIds = new Set(prev.map((el) => el.id));
+      return ids.filter((id) => survivingIds.has(id));
+    });
   }, []);
   const redo = useCallback(() => {
     const f = futureRef.current;
@@ -1559,7 +1559,10 @@ export default function Whiteboard({ board, boardList }) {
     setFuture(f.slice(1));
     setPast([...pastRef.current, current]);
     setElements(next);
-    setSelectedIds([]);
+    setSelectedIds((ids) => {
+      const survivingIds = new Set(next.map((el) => el.id));
+      return ids.filter((id) => survivingIds.has(id));
+    });
   }, []);
 
   /* ---------- coordinate transforms ---------- */
@@ -1571,14 +1574,28 @@ export default function Whiteboard({ board, boardList }) {
   /* ---------- element mutation helpers ---------- */
   const updateSelectedStyle = useCallback(
     (patch) => {
-      setStyle((s) => ({ ...s, ...patch }));
-      if (selectedIdsRef.current.length > 0) {
-        beginChange();
-        setElements((prev) => prev.map((el) => (selectedIdsRef.current.includes(el.id) ? { ...el, ...patch } : el)));
-        endChange();
+      // Read `selectedIds` (the state value, always fresh for this render)
+      // rather than `selectedIdsRef.current` — the ref is synced by a
+      // passive effect that runs after paint, so a style button clicked
+      // immediately after selecting a shape (before that effect has had a
+      // chance to flush) could otherwise see a stale, pre-selection ref
+      // value and silently no-op the style change on the first click.
+      //
+      // The toolbar's "default for new shapes" (`style`) is only updated
+      // when NOTHING is selected — editing an existing shape's style
+      // shouldn't silently redefine what future new shapes look like, and
+      // since `style` isn't part of the undo/redo history, undoing a
+      // shape's style change previously left the (now-stale) default
+      // behind for the next shape you drew.
+      if (selectedIds.length === 0) {
+        setStyle((s) => ({ ...s, ...patch }));
+        return;
       }
+      beginChange();
+      setElements((prev) => prev.map((el) => (selectedIds.includes(el.id) ? { ...el, ...patch } : el)));
+      endChange();
     },
-    [beginChange, endChange]
+    [beginChange, endChange, selectedIds]
   );
 
   const applyCanvasBackground = useCallback(
@@ -1609,11 +1626,14 @@ export default function Whiteboard({ board, boardList }) {
   }, [beginChange, endChange]);
 
   const reorderSelected = useCallback((direction) => {
-    if (selectedIdsRef.current.length === 0) return;
+    // Only ever called from the Layers panel buttons — read the fresh
+    // `selectedIds` state rather than the ref (see updateSelectedStyle for
+    // why the ref can be stale immediately after a fresh selection).
+    if (selectedIds.length === 0) return;
     beginChange();
-    setElements((prev) => reorderElements(prev, selectedIdsRef.current, direction));
+    setElements((prev) => reorderElements(prev, selectedIds, direction));
     endChange();
-  }, [beginChange, endChange]);
+  }, [beginChange, endChange, selectedIds]);
 
   const duplicateSelected = useCallback(() => {
     if (selectedIdsRef.current.length === 0) return;
@@ -2363,8 +2383,15 @@ export default function Whiteboard({ board, boardList }) {
   /* ---------- keyboard ---------- */
   useEffect(() => {
     const onKeyDown = (e) => {
-      const activeTag = document.activeElement?.tagName;
-      const typing = activeTag === "TEXTAREA" || activeTag === "INPUT";
+      const activeEl = document.activeElement as HTMLInputElement | null;
+      const activeTag = activeEl?.tagName;
+      // Only genuine text-entry fields should swallow shortcuts like
+      // Ctrl+Z — an <input type="range"> (e.g. the Opacity slider) is still
+      // an INPUT tag but has no text to type into, so treating it as
+      // "typing" here was blocking undo/redo/etc. until focus moved
+      // elsewhere (e.g. clicking the canvas) after using the slider.
+      const NON_TEXT_INPUT_TYPES = ["range", "checkbox", "radio", "button", "submit", "reset", "color", "file"];
+      const typing = activeTag === "TEXTAREA" || (activeTag === "INPUT" && !NON_TEXT_INPUT_TYPES.includes(activeEl.type));
       if (e.code === "Space" && !typing) spaceHeldRef.current = true;
       if (typing) return;
 
@@ -3117,7 +3144,7 @@ export default function Whiteboard({ board, boardList }) {
               <div className="panel-label">Stroke</div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {STROKE_COLORS.map((c) => (
-                  <div key={c.value} className={`swatch${style.stroke === c.value ? " selected" : ""}`} style={{ background: c.value, border: c.value === "#F6F6F3" ? "1px solid #E6E6E1" : undefined }} title={c.name} onClick={() => updateSelectedStyle({ stroke: c.value })} />
+                  <div key={c.value} className={`swatch${(singleSelected ? singleSelected.stroke : style.stroke) === c.value ? " selected" : ""}`} style={{ background: c.value, border: c.value === "#F6F6F3" ? "1px solid #E6E6E1" : undefined }} title={c.name} onClick={() => updateSelectedStyle({ stroke: c.value })} />
                 ))}
               </div>
             </div>
@@ -3128,7 +3155,7 @@ export default function Whiteboard({ board, boardList }) {
               <div className="panel-label">Fill</div>
               <div style={{ display: "flex", gap: 6 }}>
                 {FILL_COLORS.map((c) => (
-                  <div key={c.value} className={`swatch${style.fill === c.value ? " selected" : ""}`}
+                  <div key={c.value} className={`swatch${(singleSelected ? singleSelected.fill : style.fill) === c.value ? " selected" : ""}`}
                     style={{ background: c.value === "transparent" ? "white" : c.value, backgroundImage: c.value === "transparent" ? "linear-gradient(45deg, #ddd 25%, transparent 25%, transparent 75%, #ddd 75%), linear-gradient(45deg, #ddd 25%, transparent 25%, transparent 75%, #ddd 75%)" : "none", backgroundSize: "8px 8px", backgroundPosition: "0 0, 4px 4px" }}
                     title={c.name} onClick={() => updateSelectedStyle({ fill: c.value })} />
                 ))}
@@ -3141,13 +3168,24 @@ export default function Whiteboard({ board, boardList }) {
               <div className="panel-label">Size</div>
               <div style={{ display: "flex", gap: 4 }}>
                 {FONT_SIZES.map((f) => (
-                  <button key={f.value} className={`seg-btn${style.fontSize === f.value ? " on" : ""}`} onClick={() => {
-                    setStyle((s) => ({ ...s, fontSize: f.value }));
-                    if (selectedIdsRef.current.length > 0) {
-                      beginChange();
-                      setElements((prev) => prev.map((el) => (selectedIdsRef.current.includes(el.id) && el.type === "text" ? { ...el, fontSize: f.value, ...measureText(el.text, f.value) } : el)));
-                      endChange();
+                  <button key={f.value} className={`seg-btn${(singleSelected ? singleSelected.fontSize : style.fontSize) === f.value ? " on" : ""}`} onClick={() => {
+                    // Read `selectedIds` directly (fresh for this render) —
+                    // not the ref, which a passive effect syncs after paint
+                    // and could still be stale if this is clicked right
+                    // after selecting a shape.
+                    //
+                    // Only touch the toolbar default (used for the NEXT new
+                    // shape) when nothing's selected — editing an existing
+                    // shape's font size shouldn't redefine that default, and
+                    // since it isn't part of the undo history, undoing the
+                    // shape's change previously left a stale default behind.
+                    if (selectedIds.length === 0) {
+                      setStyle((s) => ({ ...s, fontSize: f.value }));
+                      return;
                     }
+                    beginChange();
+                    setElements((prev) => prev.map((el) => (selectedIds.includes(el.id) && el.type === "text" ? { ...el, fontSize: f.value, ...measureText(el.text, f.value) } : el)));
+                    endChange();
                   }}>{f.label}</button>
                 ))}
               </div>
@@ -3159,13 +3197,17 @@ export default function Whiteboard({ board, boardList }) {
               <div className="panel-label">Align</div>
               <div style={{ display: "flex", gap: 4 }}>
                 {TEXT_ALIGNS.map((a) => (
-                  <button key={a.value} className={`seg-btn${(style.align || "left") === a.value ? " on" : ""}`} onClick={() => {
-                    setStyle((s) => ({ ...s, align: a.value }));
-                    if (selectedIdsRef.current.length > 0) {
-                      beginChange();
-                      setElements((prev) => prev.map((el) => (selectedIdsRef.current.includes(el.id) && el.type === "text" ? { ...el, align: a.value } : el)));
-                      endChange();
+                  <button key={a.value} className={`seg-btn${((singleSelected ? singleSelected.align : style.align) || "left") === a.value ? " on" : ""}`} onClick={() => {
+                    // Same reasoning as the Size buttons above: use the
+                    // fresh `selectedIds` state (not the lagging ref), and
+                    // only touch the toolbar default when nothing's selected.
+                    if (selectedIds.length === 0) {
+                      setStyle((s) => ({ ...s, align: a.value }));
+                      return;
                     }
+                    beginChange();
+                    setElements((prev) => prev.map((el) => (selectedIds.includes(el.id) && el.type === "text" ? { ...el, align: a.value } : el)));
+                    endChange();
                   }}><a.icon size={14} /></button>
                 ))}
               </div>
@@ -3213,7 +3255,7 @@ export default function Whiteboard({ board, boardList }) {
               <div className="panel-label">Weight</div>
               <div style={{ display: "flex", gap: 4 }}>
                 {STROKE_WIDTHS.map((w) => (
-                  <button key={w.value} className={`seg-btn${style.strokeWidth === w.value ? " on" : ""}`} onClick={() => updateSelectedStyle({ strokeWidth: w.value })}>{w.label}</button>
+                  <button key={w.value} className={`seg-btn${(singleSelected ? singleSelected.strokeWidth : style.strokeWidth) === w.value ? " on" : ""}`} onClick={() => updateSelectedStyle({ strokeWidth: w.value })}>{w.label}</button>
                 ))}
               </div>
             </div>
@@ -3224,7 +3266,7 @@ export default function Whiteboard({ board, boardList }) {
               <div className="panel-label">Sketch</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 {ROUGHNESS.map((r) => (
-                  <button key={r.value} className={`seg-btn${style.roughness === r.value ? " on" : ""}`} style={{ width: "100%" }} onClick={() => updateSelectedStyle({ roughness: r.value })}>{r.label}</button>
+                  <button key={r.value} className={`seg-btn${(singleSelected ? singleSelected.roughness : style.roughness) === r.value ? " on" : ""}`} style={{ width: "100%" }} onClick={() => updateSelectedStyle({ roughness: r.value })}>{r.label}</button>
                 ))}
               </div>
             </div>
@@ -3235,7 +3277,7 @@ export default function Whiteboard({ board, boardList }) {
               <div className="panel-label">Arrow type</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 {ARROW_TYPES.map((opt) => (
-                  <button key={opt.value} className={`seg-btn${style.arrowType === opt.value ? " on" : ""}`} style={{ width: "100%" }} onClick={() => updateSelectedStyle({ arrowType: opt.value })}>{opt.label}</button>
+                  <button key={opt.value} className={`seg-btn${(singleSelected ? singleSelected.arrowType : style.arrowType) === opt.value ? " on" : ""}`} style={{ width: "100%" }} onClick={() => updateSelectedStyle({ arrowType: opt.value })}>{opt.label}</button>
                 ))}
               </div>
             </div>
@@ -3246,7 +3288,7 @@ export default function Whiteboard({ board, boardList }) {
               <div className="panel-label">Corners</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 {EDGES.map((opt) => (
-                  <button key={opt.value} className={`seg-btn${style.edges === opt.value ? " on" : ""}`} style={{ width: "100%" }} onClick={() => updateSelectedStyle({ edges: opt.value })}>{opt.label}</button>
+                  <button key={opt.value} className={`seg-btn${(singleSelected ? singleSelected.edges : style.edges) === opt.value ? " on" : ""}`} style={{ width: "100%" }} onClick={() => updateSelectedStyle({ edges: opt.value })}>{opt.label}</button>
                 ))}
               </div>
             </div>
@@ -3254,7 +3296,39 @@ export default function Whiteboard({ board, boardList }) {
 
           <div>
             <div className="panel-label">Opacity</div>
-            <input type="range" min={0.1} max={1} step={0.05} value={style.opacity} onChange={(e) => updateSelectedStyle({ opacity: parseFloat(e.target.value) })} style={{ width: "100%", accentColor: "#4C5FF7" }} />
+            <input
+              type="range" min={0.1} max={1} step={0.05} value={singleSelected ? (singleSelected.opacity ?? 1) : style.opacity}
+              onPointerDown={() => {
+                opacityDragRef.current = true;
+                if (selectedIds.length > 0) beginChange();
+              }}
+              onPointerUp={() => {
+                if (opacityDragRef.current) {
+                  opacityDragRef.current = false;
+                  if (selectedIds.length > 0) endChange();
+                }
+              }}
+              onChange={(e) => {
+                const opacity = parseFloat(e.target.value);
+                // Only touch the toolbar default (used for the NEXT new
+                // shape) when nothing's selected — see updateSelectedStyle
+                // for why editing a selected shape shouldn't also redefine
+                // that default.
+                if (selectedIds.length === 0) {
+                  setStyle((s) => ({ ...s, opacity }));
+                  return;
+                }
+                // A mouse/touch drag brackets its own begin/endChange via
+                // pointerdown/up above (one undo step for the whole drag);
+                // a keyboard arrow-key press has no pointer events at all,
+                // so it brackets its own single step here instead.
+                const isKeyboardStep = !opacityDragRef.current;
+                if (isKeyboardStep) beginChange();
+                setElements((prev) => prev.map((el) => (selectedIds.includes(el.id) ? { ...el, opacity } : el)));
+                if (isKeyboardStep) endChange();
+              }}
+              style={{ width: "100%", accentColor: "#4C5FF7" }}
+            />
           </div>
         </div>
       )}
