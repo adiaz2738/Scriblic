@@ -1,0 +1,744 @@
+{
+  "version": 1,
+  "name": "Homebuying Process",
+  "elements": [
+    {
+      "id": "el_search_0",
+      "type": "rectangle",
+      "x": 406.95,
+      "y": 127.57,
+      "w": 352.22,
+      "h": 60,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1000,
+      "edges": "sharp",
+      "label": "Search for a home\n(BRBC required per CA law)",
+      "labelFontSize": 16
+    },
+    {
+      "id": "el_preapproved_1",
+      "type": "rectangle",
+      "x": 885.54,
+      "y": 10,
+      "w": 302.22,
+      "h": 48.14,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1001,
+      "edges": "sharp",
+      "label": "Pre-approved",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_makeoffer_2",
+      "type": "rectangle",
+      "x": 406.95,
+      "y": 285.96,
+      "w": 352.22,
+      "h": 45,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1002,
+      "edges": "sharp",
+      "label": "Make an offer",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_contingencies_3",
+      "type": "rectangle",
+      "x": 406.95,
+      "y": 448.41,
+      "w": 352.22,
+      "h": 58.32,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1003,
+      "edges": "sharp",
+      "label": "Contingencies",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_investigations_4",
+      "type": "rectangle",
+      "x": 680.61,
+      "y": 542.12,
+      "w": 236.21,
+      "h": 63.9,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1004,
+      "edges": "sharp",
+      "label": "Investigations",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_insurance_5",
+      "type": "rectangle",
+      "x": 1015.92,
+      "y": 542.12,
+      "w": 236.21,
+      "h": 66.68,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1005,
+      "edges": "sharp",
+      "label": "Insurance",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_loanapproval_6",
+      "type": "rectangle",
+      "x": 345.31,
+      "y": 550.61,
+      "w": 236.21,
+      "h": 58.2,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1006,
+      "edges": "sharp",
+      "label": "Loan approval",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_appraisal_7",
+      "type": "rectangle",
+      "x": 10,
+      "y": 553.46,
+      "w": 236.21,
+      "h": 58.2,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1007,
+      "edges": "sharp",
+      "label": "Appraisal",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_investig_result_8",
+      "type": "rectangle",
+      "x": 686.89,
+      "y": 702.58,
+      "w": 223.66,
+      "h": 256.75,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1008,
+      "edges": "sharp",
+      "label": "1) Inspections\n    - Home\n    - Pest\n2) Quotes for\nrepairs\n3) Renegotiate",
+      "labelFontSize": 24,
+      "labelAlign": "left"
+    },
+    {
+      "id": "el_loan_result_9",
+      "type": "rectangle",
+      "x": 306.51,
+      "y": 686.6,
+      "w": 318.37,
+      "h": 290,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1009,
+      "edges": "sharp",
+      "label": "1) Underwriter\ninvestigates finances\n- Debt? = okay?\n- Employment? = okay?\n- Value? = okay?\n- If everything\nokay=approved",
+      "labelFontSize": 24,
+      "labelAlign": "left"
+    },
+    {
+      "id": "el_appr_result_a",
+      "type": "rectangle",
+      "x": 10,
+      "y": 686.4,
+      "w": 236.21,
+      "h": 238.85,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1010,
+      "edges": "sharp",
+      "label": "- Appraiser\nvalues house\n- Is it worth\nwhat you paid?\n- If yes=good\n- If no=options",
+      "labelFontSize": 24,
+      "labelAlign": "left"
+    },
+    {
+      "id": "el_reneg_left_b",
+      "type": "rectangle",
+      "x": 145.8,
+      "y": 1166.73,
+      "w": 562.15,
+      "h": 267.17,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1011,
+      "edges": "sharp",
+      "label": "Renegotiate\n\n1) Accept terms as-is\n2) Seller accepts=great!\n3) Back out -> recover deposit",
+      "labelFontSize": 24,
+      "labelAlign": "left"
+    },
+    {
+      "id": "el_reneg_right_c",
+      "type": "rectangle",
+      "x": 897.15,
+      "y": 1172.95,
+      "w": 562.15,
+      "h": 267.17,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1012,
+      "edges": "sharp",
+      "label": "Renegotiate\n\n1) Accept terms as-is\n2) Seller accepts=great!\n3) Back out -> Deposit at risk",
+      "labelFontSize": 24,
+      "labelAlign": "left"
+    },
+    {
+      "id": "el_cont_removed_d",
+      "type": "rectangle",
+      "x": 575.95,
+      "y": 1870.22,
+      "w": 446.96,
+      "h": 115,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1013,
+      "edges": "sharp",
+      "label": "Contingencies removed\n(on 17th day)\nCommitted to the purchase",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_backout_e",
+      "type": "rectangle",
+      "x": 1094.11,
+      "y": 2142.94,
+      "w": 446.96,
+      "h": 147.14,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1014,
+      "edges": "sharp",
+      "label": "Back out=breach of contract\n(deposit at risk)",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_dontremove_f",
+      "type": "rectangle",
+      "x": 566.16,
+      "y": 2141.51,
+      "w": 469.87,
+      "h": 150,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1015,
+      "edges": "sharp",
+      "label": "Don't remove=breach of contract\n(seller sends Notice to Perform)\n1) Must perform in 2 days\n2) Seller can cancel contract",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_proceed_g",
+      "type": "rectangle",
+      "x": 46.77,
+      "y": 2141.51,
+      "w": 469.87,
+      "h": 150,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1016,
+      "edges": "sharp",
+      "label": "Proceed to closing\n1) Sign loan docs\n2) Final walkthrough",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_closingday_h",
+      "type": "rectangle",
+      "x": 46.18,
+      "y": 2368.64,
+      "w": 469.87,
+      "h": 115,
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1017,
+      "edges": "sharp",
+      "label": "Closing Day\n1) Record\n2) Get keys",
+      "labelFontSize": 24
+    },
+    {
+      "id": "el_title_i",
+      "type": "text",
+      "x": 448.06,
+      "y": 21.18,
+      "text": "Homebuying Process",
+      "fontSize": 24,
+      "align": "left",
+      "stroke": "#232326",
+      "opacity": 1,
+      "width": 300,
+      "height": 32
+    },
+    {
+      "id": "el_caption_cont_j",
+      "type": "text",
+      "x": 500.11,
+      "y": 510.14,
+      "text": "(default 17 days)",
+      "fontSize": 16,
+      "align": "left",
+      "stroke": "#232326",
+      "opacity": 1,
+      "width": 180,
+      "height": 22
+    },
+    {
+      "id": "el_caption_makeoffer_k",
+      "type": "text",
+      "x": 440.57,
+      "y": 337.84,
+      "text": "(We review together)",
+      "fontSize": 24,
+      "align": "left",
+      "stroke": "#232326",
+      "opacity": 1,
+      "width": 300,
+      "height": 32
+    },
+    {
+      "id": "el_caption_reneg_left_l",
+      "type": "text",
+      "x": 328.33,
+      "y": 1446.68,
+      "text": "Contingencies in place\n(during 17 days)",
+      "fontSize": 16,
+      "align": "center",
+      "stroke": "#232326",
+      "opacity": 1,
+      "width": 230,
+      "height": 46
+    },
+    {
+      "id": "el_caption_reneg_right_m",
+      "type": "text",
+      "x": 1055.19,
+      "y": 1452.9,
+      "text": "Contingencies not in place\n(after 17 days)",
+      "fontSize": 16,
+      "align": "center",
+      "stroke": "#232326",
+      "opacity": 1,
+      "width": 270,
+      "height": 46
+    },
+    {
+      "id": "el_or_label_n",
+      "type": "text",
+      "x": 783.41,
+      "y": 1282.82,
+      "text": "OR",
+      "fontSize": 24,
+      "align": "center",
+      "stroke": "#232326",
+      "opacity": 1,
+      "width": 50,
+      "height": 32
+    },
+    {
+      "id": "el_arrow0_o",
+      "type": "arrow",
+      "points": [
+        {
+          "x": 583.06,
+          "y": 193.57
+        },
+        {
+          "x": 583.06,
+          "y": 279.96
+        }
+      ],
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1018,
+      "elbowWaypoints": null,
+      "manuallyRouted": false,
+      "startBinding": {
+        "elementId": "el_search_0",
+        "focus": 0,
+        "side": "b"
+      },
+      "endBinding": {
+        "elementId": "el_makeoffer_2",
+        "focus": 0,
+        "side": "t"
+      }
+    },
+    {
+      "id": "el_arrow1_p",
+      "type": "arrow",
+      "points": [
+        {
+          "x": 879.5400000000001,
+          "y": 34.07
+        },
+        {
+          "x": 765.17,
+          "y": 157.57
+        }
+      ],
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1019,
+      "elbowWaypoints": null,
+      "manuallyRouted": false,
+      "startBinding": {
+        "elementId": "el_preapproved_1",
+        "focus": 0,
+        "side": "l"
+      },
+      "endBinding": {
+        "elementId": "el_search_0",
+        "focus": 0,
+        "side": "r"
+      }
+    },
+    {
+      "id": "el_arrow2_q",
+      "type": "arrow",
+      "points": [
+        {
+          "x": 798.715,
+          "y": 612.0200000000001
+        },
+        {
+          "x": 798.72,
+          "y": 696.58
+        }
+      ],
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1020,
+      "elbowWaypoints": null,
+      "manuallyRouted": false,
+      "startBinding": {
+        "elementId": "el_investigations_4",
+        "focus": 0,
+        "side": "b"
+      },
+      "endBinding": {
+        "elementId": "el_investig_result_8",
+        "focus": 0,
+        "side": "t"
+      }
+    },
+    {
+      "id": "el_arrow3_r",
+      "type": "arrow",
+      "points": [
+        {
+          "x": 463.415,
+          "y": 614.8100000000001
+        },
+        {
+          "x": 465.695,
+          "y": 680.6
+        }
+      ],
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1021,
+      "elbowWaypoints": null,
+      "manuallyRouted": false,
+      "startBinding": {
+        "elementId": "el_loanapproval_6",
+        "focus": 0,
+        "side": "b"
+      },
+      "endBinding": {
+        "elementId": "el_loan_result_9",
+        "focus": 0,
+        "side": "t"
+      }
+    },
+    {
+      "id": "el_arrow4_s",
+      "type": "arrow",
+      "points": [
+        {
+          "x": 128.10500000000002,
+          "y": 617.6600000000001
+        },
+        {
+          "x": 128.10500000000002,
+          "y": 680.4
+        }
+      ],
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1022,
+      "elbowWaypoints": null,
+      "manuallyRouted": false,
+      "startBinding": {
+        "elementId": "el_appraisal_7",
+        "focus": 0,
+        "side": "b"
+      },
+      "endBinding": {
+        "elementId": "el_appr_result_a",
+        "focus": 0,
+        "side": "t"
+      }
+    },
+    {
+      "id": "el_arrow5_t",
+      "type": "arrow",
+      "points": [
+        {
+          "x": 128.10500000000002,
+          "y": 931.2499999999999
+        },
+        {
+          "x": 187.96125,
+          "y": 1160.73
+        }
+      ],
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1023,
+      "elbowWaypoints": null,
+      "manuallyRouted": false,
+      "startBinding": {
+        "elementId": "el_appr_result_a",
+        "focus": 0,
+        "side": "b"
+      },
+      "endBinding": {
+        "elementId": "el_reneg_left_b",
+        "focus": -0.85,
+        "side": "t"
+      }
+    },
+    {
+      "id": "el_arrow6_u",
+      "type": "arrow",
+      "points": [
+        {
+          "x": 465.695,
+          "y": 982.6
+        },
+        {
+          "x": 465.66335,
+          "y": 1160.73
+        }
+      ],
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1024,
+      "elbowWaypoints": null,
+      "manuallyRouted": false,
+      "startBinding": {
+        "elementId": "el_loan_result_9",
+        "focus": 0,
+        "side": "b"
+      },
+      "endBinding": {
+        "elementId": "el_reneg_left_b",
+        "focus": 0.138,
+        "side": "t"
+      }
+    },
+    {
+      "id": "el_arrow7_v",
+      "type": "arrow",
+      "points": [
+        {
+          "x": 798.72,
+          "y": 965.33
+        },
+        {
+          "x": 665.7887499999999,
+          "y": 1160.73
+        }
+      ],
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1025,
+      "elbowWaypoints": null,
+      "manuallyRouted": false,
+      "startBinding": {
+        "elementId": "el_investig_result_8",
+        "focus": 0,
+        "side": "b"
+      },
+      "endBinding": {
+        "elementId": "el_reneg_left_b",
+        "focus": 0.85,
+        "side": "t"
+      }
+    },
+    {
+      "id": "el_arrow8_w",
+      "type": "arrow",
+      "points": [
+        {
+          "x": 799.43,
+          "y": 1510
+        },
+        {
+          "x": 799.4300000000001,
+          "y": 1864.22
+        }
+      ],
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1026,
+      "elbowWaypoints": null,
+      "manuallyRouted": false,
+      "startBinding": null,
+      "endBinding": {
+        "elementId": "el_cont_removed_d",
+        "focus": 0,
+        "side": "t"
+      }
+    },
+    {
+      "id": "el_arrow9_x",
+      "type": "arrow",
+      "points": [
+        {
+          "x": 281.705,
+          "y": 2297.51
+        },
+        {
+          "x": 281.115,
+          "y": 2362.64
+        }
+      ],
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1027,
+      "elbowWaypoints": null,
+      "manuallyRouted": false,
+      "startBinding": {
+        "elementId": "el_proceed_g",
+        "focus": 0,
+        "side": "b"
+      },
+      "endBinding": {
+        "elementId": "el_closingday_h",
+        "focus": 0,
+        "side": "t"
+      }
+    },
+    {
+      "id": "el_arrow10_y",
+      "type": "arrow",
+      "points": [
+        {
+          "x": 583.06,
+          "y": 336.96
+        },
+        {
+          "x": 583.06,
+          "y": 442.41
+        }
+      ],
+      "stroke": "#232326",
+      "fill": "transparent",
+      "strokeWidth": 3.5,
+      "roughness": "artist",
+      "opacity": 1,
+      "seed": 1028,
+      "elbowWaypoints": null,
+      "manuallyRouted": false,
+      "startBinding": {
+        "elementId": "el_makeoffer_2",
+        "focus": 0,
+        "side": "b"
+      },
+      "endBinding": {
+        "elementId": "el_contingencies_3",
+        "focus": 0,
+        "side": "t"
+      }
+    }
+  ],
+  "canvasBg": "#FFFFFF"
+}

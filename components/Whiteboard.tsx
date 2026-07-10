@@ -34,6 +34,7 @@ import {
   Lock,
   Clipboard,
   Code2,
+  ImageDown,
   Flashlight,
   Presentation,
   Check,
@@ -1268,6 +1269,10 @@ export default function Whiteboard({ board, boardList }) {
   const [interactingEmbedId, setInteractingEmbedId] = useState(null);
   const [contextMenu, setContextMenu] = useState(null); // { x, y } in screen coords, or null when closed
   const [toast, setToast] = useState(null);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportBackground, setExportBackground] = useState(true);
+  const [exportDarkMode, setExportDarkMode] = useState(false);
+  const [exportScale, setExportScale] = useState(2);
   const [saveStatus, setSaveStatus] = useState("saved"); // idle | saving | saved | error
   const [past, setPast] = useState([]);
   const [future, setFuture] = useState([]);
@@ -2612,8 +2617,12 @@ export default function Whiteboard({ board, boardList }) {
     [addProject]
   );
 
-  /* ---------- PNG export ---------- */
-  const buildBoardSvgString = useCallback(() => {
+  /* ---------- PNG/SVG export ---------- */
+  // `background`/`dark` only affect the export render (bg fill + swapping the
+  // default "ink" stroke/fill color for its light-on-dark counterpart) — the
+  // live board and its elements are never mutated.
+  const buildBoardSvgString = useCallback((opts: { background?: boolean; dark?: boolean } = {}) => {
+    const { background = true, dark = false } = opts;
     const els = elementsRef.current;
     if (els.length === 0) throw new Error("Nothing to export yet");
     const boxes = els.map(getBBox);
@@ -2627,21 +2636,38 @@ export default function Whiteboard({ board, boardList }) {
     svg.setAttribute("width", String(w));
     svg.setAttribute("height", String(h));
     svg.setAttribute("viewBox", `${minX} ${minY} ${w} ${h}`);
-    const bg = document.createElementNS(svgNS, "rect");
-    bg.setAttribute("x", String(minX)); bg.setAttribute("y", String(minY)); bg.setAttribute("width", String(w)); bg.setAttribute("height", String(h)); bg.setAttribute("fill", canvasBgRef.current);
-    svg.appendChild(bg);
+    if (background) {
+      const bg = document.createElementNS(svgNS, "rect");
+      bg.setAttribute("x", String(minX)); bg.setAttribute("y", String(minY)); bg.setAttribute("width", String(w)); bg.setAttribute("height", String(h)); bg.setAttribute("fill", dark ? DARK.appBg : canvasBgRef.current);
+      svg.appendChild(bg);
+    }
 
     const contentGroup = svgRef.current.querySelector("#content-layer");
     if (contentGroup) {
-      const clone = contentGroup.cloneNode(true);
+      const clone = contentGroup.cloneNode(true) as Element;
       clone.querySelectorAll("iframe").forEach((f) => f.remove());
+      if (dark) {
+        // The board has no per-element "theme" — el.stroke/el.fill are fixed
+        // hex values from the swatch palette. The only one theme-dependent
+        // by convention is the default ink color (Graphite, chosen for light
+        // backgrounds); swap it for the Paper swatch (DARK.ink) so default
+        // strokes/text stay legible against the dark export background.
+        // Explicitly-chosen colors (Indigo/Teal/Amber/Rose, fills) are left alone.
+        const graphite = STROKE_COLORS.find((c) => c.name === "Graphite")!.value.toLowerCase();
+        const paperInk = STROKE_COLORS.find((c) => c.name === "Paper")!.value;
+        clone.querySelectorAll("[stroke],[fill]").forEach((node) => {
+          if (node.getAttribute("stroke")?.toLowerCase() === graphite) node.setAttribute("stroke", paperInk);
+          if (node.getAttribute("fill")?.toLowerCase() === graphite) node.setAttribute("fill", paperInk);
+        });
+      }
       svg.appendChild(clone);
     }
 
     return new XMLSerializer().serializeToString(svg);
   }, []);
 
-  const buildBoardCanvas = useCallback(() => {
+  const buildBoardCanvas = useCallback((opts: { background?: boolean; dark?: boolean; scale?: number } = {}) => {
+    const { background = true, dark = false, scale = 2 } = opts;
     return new Promise<HTMLCanvasElement>((resolve, reject) => {
       try {
         const els = elementsRef.current;
@@ -2651,17 +2677,18 @@ export default function Whiteboard({ board, boardList }) {
         const maxX = Math.max(...boxes.map((b) => b.x + b.w)) + 40, maxY = Math.max(...boxes.map((b) => b.y + b.h)) + 40;
         const w = Math.max(50, maxX - minX), h = Math.max(50, maxY - minY);
 
-        const svgString = buildBoardSvgString();
+        const svgString = buildBoardSvgString({ background, dark });
         const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
         const url = URL.createObjectURL(svgBlob);
         const img = new Image();
         img.onload = () => {
-          const scale = 2;
           const canvas = document.createElement("canvas");
           canvas.width = w * scale; canvas.height = h * scale;
           const ctx = canvas.getContext("2d");
-          ctx.fillStyle = canvasBgRef.current;
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          if (background) {
+            ctx.fillStyle = dark ? DARK.appBg : canvasBgRef.current;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+          }
           ctx.scale(scale, scale);
           ctx.drawImage(img, 0, 0, w, h);
           URL.revokeObjectURL(url);
@@ -2675,9 +2702,9 @@ export default function Whiteboard({ board, boardList }) {
     });
   }, [buildBoardSvgString]);
 
-  const exportPNG = useCallback(async () => {
+  const exportPNG = useCallback(async (opts?: { background?: boolean; dark?: boolean; scale?: number }) => {
     try {
-      const canvas = await buildBoardCanvas();
+      const canvas = await buildBoardCanvas(opts);
       const dataUrl = canvas.toDataURL("image/png");
       const a = document.createElement("a");
       a.href = dataUrl; a.download = "board.png"; a.click();
@@ -2686,9 +2713,22 @@ export default function Whiteboard({ board, boardList }) {
     }
   }, [buildBoardCanvas]);
 
-  const copyPNG = useCallback(async () => {
+  const exportSVGFile = useCallback((opts?: { background?: boolean; dark?: boolean }) => {
     try {
-      const canvas = await buildBoardCanvas();
+      const svgString = buildBoardSvgString(opts);
+      const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = "board.svg"; a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setToast("Nothing to export yet");
+    }
+  }, [buildBoardSvgString]);
+
+  const copyPNG = useCallback(async (opts?: { background?: boolean; dark?: boolean; scale?: number }) => {
+    try {
+      const canvas = await buildBoardCanvas(opts);
       canvas.toBlob(async (blob) => {
         if (!blob) { setToast("Couldn't copy — try downloading instead"); return; }
         try {
@@ -2702,16 +2742,6 @@ export default function Whiteboard({ board, boardList }) {
       setToast("Nothing to copy yet");
     }
   }, [buildBoardCanvas]);
-
-  const copySVG = useCallback(async () => {
-    try {
-      const svgString = buildBoardSvgString();
-      await navigator.clipboard.writeText(svgString);
-      setToast("Copied SVG markup to clipboard");
-    } catch (err) {
-      setToast("Couldn't copy — try again");
-    }
-  }, [buildBoardSvgString]);
 
   /* ---------- derived ---------- */
   const selectedElements = useMemo(() => (elements || []).filter((el) => selectedIds.includes(el.id)), [elements, selectedIds]);
@@ -2828,6 +2858,12 @@ export default function Whiteboard({ board, boardList }) {
         .ctx-item:hover { background: ${theme.hover}; }
         .ctx-item.danger { color: #E5484D; }
         .ctx-sep { height: 1px; background: ${theme.panelBorder}; margin: 4px 2px; }
+        .export-preview { background-image: linear-gradient(45deg, ${theme.hover} 25%, transparent 25%), linear-gradient(-45deg, ${theme.hover} 25%, transparent 25%), linear-gradient(45deg, transparent 75%, ${theme.hover} 75%), linear-gradient(-45deg, transparent 75%, ${theme.hover} 75%); background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0px; }
+        .export-preview svg { display: block; width: 100%; height: 100%; max-height: 320px; }
+        .export-action-btn { display: flex; align-items: center; justify-content: center; gap: 7px; flex: 1; padding: 10px 0; border-radius: 10px; border: 1px solid ${theme.panelBorder}; background: transparent; color: ${theme.ink}; font-size: 13px; font-family: inherit; cursor: pointer; transition: background 120ms ease; }
+        .export-action-btn:hover { background: ${theme.hover}; }
+        .export-action-btn:disabled { opacity: 0.4; cursor: default; }
+        .export-action-btn:disabled:hover { background: transparent; }
       `}</style>
 
       <svg ref={svgRef} width="100%" height="100%" style={{ cursor: canvasCursor, display: "block" }} onPointerDown={handleCanvasPointerDown} onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}>
@@ -3197,9 +3233,7 @@ export default function Whiteboard({ board, boardList }) {
         <div style={{ width: 1, background: theme.panelBorder, margin: "4px 3px" }} />
         <button className="tb-btn" title="Save as… (.json)" onClick={exportJSON}><Save size={18} /></button>
         <button className="tb-btn" title="Import a board (.json)" onClick={() => jsonInputRef.current?.click()}><Upload size={18} /></button>
-        <button className="tb-btn" title="Export PNG" onClick={exportPNG}><Download size={18} /></button>
-        <button className="tb-btn" title="Copy PNG to clipboard" onClick={copyPNG}><Clipboard size={18} /></button>
-        <button className="tb-btn" title="Copy SVG markup" onClick={copySVG}><Code2 size={18} /></button>
+        <button className="tb-btn" title="Export image" onClick={() => setExportDialogOpen(true)}><ImageDown size={18} /></button>
         <div style={{ width: 1, background: theme.panelBorder, margin: "4px 3px" }} />
         <button className="tb-btn" title="Clear board" onClick={clearCanvas}><Trash2 size={18} /></button>
         <button className={`tb-btn${presentationMode ? " active" : ""}`} title="Presentation mode" onClick={() => setPresentationMode((v) => !v)}><Presentation size={18} /></button>
@@ -3444,11 +3478,34 @@ export default function Whiteboard({ board, boardList }) {
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: saveStatus === "error" ? "#E5484D" : theme.hud }}>{saveLabel}</div>
       </div>
 
-      {laserTrail.map((p, i) => {
-        const age = Date.now() - p.t;
-        const opacity = Math.max(0, 1 - age / 700);
-        return <div key={i} style={{ position: "absolute", left: p.x - 5, top: p.y - 5, width: 10, height: 10, borderRadius: "50%", background: "#E5484D", opacity, pointerEvents: "none", boxShadow: `0 0 ${8 * opacity}px rgba(229,72,77,${opacity})` }} />;
-      })}
+      {laserTrail.length > 1 && (
+        <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none", overflow: "visible" }}>
+          {laserTrail.slice(0, -1).map((_, i) => {
+            // A small sliding window around each consecutive pair, fed through
+            // the same smoothing used for the freehand pen tool, so adjacent
+            // segments overlap into one continuous curved trail instead of
+            // discrete straight/circular dots.
+            const window = laserTrail.slice(Math.max(0, i - 1), i + 3).map((pt) => [pt.x, pt.y]);
+            const d = smoothFreehandPath(window);
+            const age = Date.now() - laserTrail[i + 1].t;
+            const opacity = Math.max(0, 1 - age / 700);
+            if (opacity <= 0) return null;
+            return (
+              <path
+                key={i}
+                d={d}
+                fill="none"
+                stroke="#E5484D"
+                strokeWidth={4}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={opacity}
+                style={{ filter: `drop-shadow(0 0 ${6 * opacity}px rgba(229,72,77,${opacity}))` }}
+              />
+            );
+          })}
+        </svg>
+      )}
 
       {toast && (
         <div style={{ position: "absolute", bottom: 70, left: "50%", transform: "translateX(-50%)", background: theme.ink, color: theme.appBg, padding: "8px 16px", borderRadius: 10, fontSize: 13, zIndex: 40 }}>{toast}</div>
@@ -3486,6 +3543,77 @@ export default function Whiteboard({ board, boardList }) {
           <button className="ctx-item danger" onClick={() => { deleteSelected(); setContextMenu(null); }}>Delete</button>
         </div>
       )}
+
+      {exportDialogOpen && (() => {
+        let previewSvg: string | null = null;
+        try {
+          previewSvg = buildBoardSvgString({ background: exportBackground, dark: exportDarkMode });
+        } catch {
+          previewSvg = null;
+        }
+        const opts = { background: exportBackground, dark: exportDarkMode, scale: exportScale };
+        return (
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center" }}
+            onPointerDown={() => setExportDialogOpen(false)}
+          >
+            <div
+              onPointerDown={(e) => e.stopPropagation()}
+              style={{ width: 420, maxWidth: "90vw", maxHeight: "88vh", overflowY: "auto", background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`, borderRadius: 16, boxShadow: theme.shadow, padding: 18 }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+                <span style={{ fontSize: 15, fontWeight: 600, color: theme.ink }}>Export image</span>
+                <button className="icon-btn-sm" onClick={() => setExportDialogOpen(false)}><X size={16} /></button>
+              </div>
+
+              <div className="export-preview" style={{ width: "100%", height: 220, borderRadius: 12, border: `1px solid ${theme.panelBorder}`, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 16 }}>
+                {previewSvg ? (
+                  <div style={{ width: "100%", height: "100%" }} dangerouslySetInnerHTML={{ __html: previewSvg }} />
+                ) : (
+                  <span style={{ fontSize: 12, color: theme.muted }}>Nothing to export yet</span>
+                )}
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <div className="panel-label" style={{ marginBottom: 0 }}>Background</div>
+                <button
+                  onClick={() => setExportBackground((v) => !v)}
+                  title="Toggle background fill"
+                  style={{ position: "relative", width: 34, height: 19, borderRadius: 10, border: "none", padding: 0, cursor: "pointer", background: exportBackground ? "#4C5FF7" : theme.panelBorder, transition: "background 120ms ease" }}
+                >
+                  <span style={{ position: "absolute", top: 2, left: exportBackground ? 17 : 2, width: 15, height: 15, borderRadius: "50%", background: "white", transition: "left 120ms ease", boxShadow: "0 1px 2px rgba(0,0,0,0.25)" }} />
+                </button>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <div className="panel-label" style={{ marginBottom: 0 }}>Dark mode</div>
+                <button
+                  onClick={() => setExportDarkMode((v) => !v)}
+                  title="Export using dark theme colors"
+                  style={{ position: "relative", width: 34, height: 19, borderRadius: 10, border: "none", padding: 0, cursor: "pointer", background: exportDarkMode ? "#4C5FF7" : theme.panelBorder, transition: "background 120ms ease" }}
+                >
+                  <span style={{ position: "absolute", top: 2, left: exportDarkMode ? 17 : 2, width: 15, height: 15, borderRadius: "50%", background: "white", transition: "left 120ms ease", boxShadow: "0 1px 2px rgba(0,0,0,0.25)" }} />
+                </button>
+              </div>
+
+              <div style={{ marginBottom: 16 }}>
+                <div className="panel-label">Scale</div>
+                <div style={{ display: "flex", gap: 4 }}>
+                  {[1, 2, 3].map((s) => (
+                    <button key={s} className={`seg-btn${exportScale === s ? " on" : ""}`} onClick={() => setExportScale(s)}>{s}x</button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="export-action-btn" disabled={!previewSvg} onClick={() => exportPNG(opts)}><Download size={15} /> PNG</button>
+                <button className="export-action-btn" disabled={!previewSvg} onClick={() => exportSVGFile(opts)}><Code2 size={15} /> SVG</button>
+                <button className="export-action-btn" disabled={!previewSvg} onClick={() => copyPNG(opts)}><Clipboard size={15} /> Copy</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
