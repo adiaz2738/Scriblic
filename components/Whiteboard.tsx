@@ -45,6 +45,12 @@ import {
   AlignLeft,
   AlignCenter,
   AlignRight,
+  AlignHorizontalJustifyStart,
+  AlignHorizontalJustifyCenter,
+  AlignHorizontalJustifyEnd,
+  AlignVerticalJustifyStart,
+  AlignVerticalJustifyCenter,
+  AlignVerticalJustifyEnd,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -120,6 +126,17 @@ const TEXT_ALIGNS = [
   { value: "right", icon: AlignRight },
 ];
 
+// Multi-select alignment actions — align every selected element's edge/
+// center on the given axis to the overall selection's own bounding box.
+const ALIGN_ACTIONS = [
+  { mode: "left", icon: AlignHorizontalJustifyStart, title: "Align left" },
+  { mode: "centerH", icon: AlignHorizontalJustifyCenter, title: "Align center (horizontal)" },
+  { mode: "right", icon: AlignHorizontalJustifyEnd, title: "Align right" },
+  { mode: "top", icon: AlignVerticalJustifyStart, title: "Align top" },
+  { mode: "centerV", icon: AlignVerticalJustifyCenter, title: "Align middle (vertical)" },
+  { mode: "bottom", icon: AlignVerticalJustifyEnd, title: "Align bottom" },
+];
+
 const ROUGHNESS = [
   { label: "Architect", value: "architect", amp: 0.5, passes: 1 },
   { label: "Artist", value: "artist", amp: 1.7, passes: 2 },
@@ -145,7 +162,7 @@ const WEIGHT_TYPES = ["rectangle", "diamond", "ellipse", "line", "arrow", "freeh
 const SKETCH_TYPES = ["rectangle", "diamond", "ellipse", "line", "arrow"];
 const STROKELESS_TYPES = ["image", "embed"];
 const BOX_TYPES = ["rectangle", "diamond", "ellipse", "text", "image", "embed", "link"];
-const ALIGNABLE_TYPES = ["rectangle", "diamond", "ellipse"];
+const ALIGNABLE_TYPES = ["rectangle", "diamond", "ellipse", "text"];
 const LABELABLE_TYPES = ["rectangle", "diamond", "ellipse"];
 const EDGE_TYPES = ["rectangle", "diamond"];
 const EDGES = [{ label: "Sharp", value: "sharp" }, { label: "Round", value: "round" }];
@@ -1262,7 +1279,7 @@ export default function Whiteboard({ board, boardList }) {
   const [canvasBg, setCanvasBg] = useState(board.canvasBg || CANVAS_BACKGROUNDS[0].value);
   const [selectedIds, setSelectedIds] = useState([]);
   const [tool, setTool] = useState("select");
-  const [style, setStyle] = useState(() => ({ stroke: defaultStrokeForBg(board.canvasBg || CANVAS_BACKGROUNDS[0].value), fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, align: "left", edges: "sharp", arrowType: "elbow" }));
+  const [style, setStyle] = useState(() => ({ stroke: defaultStrokeForBg(board.canvasBg || CANVAS_BACKGROUNDS[0].value), fill: FILL_COLORS[0].value, strokeWidth: STROKE_WIDTHS[1].value, roughness: "artist", opacity: 1, fontSize: 20, align: "left", edges: "round", arrowType: "elbow" }));
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [marquee, setMarquee] = useState(null);
@@ -1278,6 +1295,7 @@ export default function Whiteboard({ board, boardList }) {
   const [embedDraft, setEmbedDraft] = useState(null);
   const [embedUrlInput, setEmbedUrlInput] = useState("");
   const [interactingEmbedId, setInteractingEmbedId] = useState(null);
+  const [contextMenu, setContextMenu] = useState(null); // { x, y } in screen coords, or null when closed
   const [toast, setToast] = useState(null);
   const [saveStatus, setSaveStatus] = useState("saved"); // idle | saving | saved | error
   const [past, setPast] = useState([]);
@@ -1316,6 +1334,7 @@ export default function Whiteboard({ board, boardList }) {
   // slider fires many of those per drag — without this, Ctrl+Z would only
   // undo the last imperceptible increment, not the whole gesture).
   const opacityDragRef = useRef(false);
+  const contextMenuRef = useRef(null);
 
   useEffect(() => { elementsRef.current = elements; }, [elements]);
   useEffect(() => { pastRef.current = past; }, [past]);
@@ -1635,6 +1654,82 @@ export default function Whiteboard({ board, boardList }) {
     endChange();
   }, [beginChange, endChange, selectedIds]);
 
+  // Aligns every selected element's edge/center on the given axis to match
+  // the OVERALL SELECTION'S bounding box (not one designated anchor element)
+  // — e.g. "left" moves every element's left edge to the leftmost edge
+  // already present among the selection.
+  const alignSelected = useCallback(
+    (mode) => {
+      if (selectedIds.length < 2) return;
+      const targets = elementsRef.current
+        .filter((el) => selectedIds.includes(el.id))
+        .map((el) => ({ el, box: getBBox(el) }));
+      const left = Math.min(...targets.map((t) => t.box.x));
+      const right = Math.max(...targets.map((t) => t.box.x + t.box.w));
+      const top = Math.min(...targets.map((t) => t.box.y));
+      const bottom = Math.max(...targets.map((t) => t.box.y + t.box.h));
+      const centerX = (left + right) / 2;
+      const centerY = (top + bottom) / 2;
+      const deltaFor = (box) => {
+        switch (mode) {
+          case "left": return { dx: left - box.x, dy: 0 };
+          case "centerH": return { dx: centerX - (box.x + box.w / 2), dy: 0 };
+          case "right": return { dx: right - (box.x + box.w), dy: 0 };
+          case "top": return { dx: 0, dy: top - box.y };
+          case "centerV": return { dx: 0, dy: centerY - (box.y + box.h / 2) };
+          case "bottom": return { dx: 0, dy: bottom - (box.y + box.h) };
+          default: return { dx: 0, dy: 0 };
+        }
+      };
+      beginChange();
+      setElements((prev) => {
+        const movedIds = new Set(selectedIds);
+        const next = prev.map((el) => {
+          const target = targets.find((t) => t.el.id === el.id);
+          if (!target) return el;
+          const { dx, dy } = deltaFor(target.box);
+          if (dx === 0 && dy === 0) return el;
+          if (el.points) {
+            const points = el.points.map((p) => ({ x: p.x + dx, y: p.y + dy }));
+            const elbowWaypoints = el.elbowWaypoints ? el.elbowWaypoints.map((p) => ({ x: p.x + dx, y: p.y + dy })) : el.elbowWaypoints;
+            return { ...el, points, elbowWaypoints };
+          }
+          return { ...el, x: el.x + dx, y: el.y + dy };
+        });
+        return updateBoundArrows(next, movedIds);
+      });
+      endChange();
+    },
+    [beginChange, endChange, selectedIds]
+  );
+
+  // Extracted so both the Ctrl+G keyboard shortcut and the right-click
+  // context menu call the exact same logic rather than duplicating it.
+  const groupSelected = useCallback(() => {
+    if (selectedIds.length <= 1) return;
+    const gid = genId();
+    beginChange();
+    setElements((prev) => prev.map((el) => (selectedIds.includes(el.id) ? { ...el, groupId: gid } : el)));
+    endChange();
+  }, [beginChange, endChange, selectedIds]);
+
+  const ungroupSelected = useCallback(() => {
+    if (selectedIds.length === 0) return;
+    beginChange();
+    setElements((prev) => prev.map((el) => (selectedIds.includes(el.id) ? { ...el, groupId: undefined } : el)));
+    endChange();
+  }, [beginChange, endChange, selectedIds]);
+
+  const toggleLockSelected = useCallback(() => {
+    if (selectedIds.length === 0) return;
+    const selected = elementsRef.current.filter((el) => selectedIds.includes(el.id));
+    const allLocked = selected.every((el) => el.locked);
+    beginChange();
+    setElements((prev) => prev.map((el) => (selectedIds.includes(el.id) ? { ...el, locked: !allLocked } : el)));
+    endChange();
+    if (!allLocked) setSelectedIds([]); // deselect after locking, since locked elements shouldn't show active handles
+  }, [beginChange, endChange, selectedIds]);
+
   const duplicateSelected = useCallback(() => {
     if (selectedIdsRef.current.length === 0) return;
     beginChange();
@@ -1836,8 +1931,12 @@ export default function Whiteboard({ board, boardList }) {
             const el = currentEls.find((e2) => e2.id === id);
             if (!el || orig.points || !ALIGNABLE_TYPES.includes(el.type)) continue;
             const nx = orig.x + rawDx, ny = orig.y + rawDy;
+            // getBBox (not raw el.w/el.h) so text elements — which store
+            // their size as width/height, not w/h — contribute a correct
+            // bbox here instead of collapsing to zero width/height.
+            const { w: elW, h: elH } = getBBox(el);
             bx1 = Math.min(bx1, nx); by1 = Math.min(by1, ny);
-            bx2 = Math.max(bx2, nx + (el.w || 0)); by2 = Math.max(by2, ny + (el.h || 0));
+            bx2 = Math.max(bx2, nx + elW); by2 = Math.max(by2, ny + elH);
           }
           if (bx1 !== Infinity) {
             const proposedBBox = { x: bx1, y: by1, w: bx2 - bx1, h: by2 - by1 };
@@ -2301,6 +2400,24 @@ export default function Whiteboard({ board, boardList }) {
     [beginChange, beginDrag, boardId, editingLabel, editingText, finishLabelEdit, finishTextEdit, goToBoard, screenToWorld, startTextAt]
   );
 
+  const handleShapeContextMenu = useCallback(
+    (e, el) => {
+      if (toolRef.current !== "select") return;
+      e.preventDefault();
+      e.stopPropagation();
+      // If right-clicking something outside the current selection, select
+      // it (or its group) first — same expansion rule as a plain click —
+      // so the menu always acts on what you just right-clicked. Right-
+      // clicking a member of an existing multi-selection leaves it as-is.
+      if (!selectedIdsRef.current.includes(el.id)) {
+        const groupIds = el.groupId ? elementsRef.current.filter((e2) => e2.groupId === el.groupId).map((e2) => e2.id) : [el.id];
+        setSelectedIds(groupIds);
+      }
+      setContextMenu({ x: e.clientX, y: e.clientY });
+    },
+    []
+  );
+
   const handleResizePointerDown = useCallback(
     (e, el, handle) => {
       e.stopPropagation();
@@ -2401,40 +2518,16 @@ export default function Whiteboard({ board, boardList }) {
       if (meta && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); return; }
       if (meta && e.key.toLowerCase() === "d") { e.preventDefault(); duplicateSelected(); return; }
       if (meta && e.key.toLowerCase() === "a") { e.preventDefault(); setSelectedIds(elementsRef.current.map((el) => el.id)); return; }
-      if (meta && e.key.toLowerCase() === "g" && e.shiftKey) {
-        e.preventDefault();
-        if (selectedIdsRef.current.length > 0) {
-          beginChange();
-          setElements((prev) => prev.map((el) => (selectedIdsRef.current.includes(el.id) ? { ...el, groupId: undefined } : el)));
-          endChange();
-        }
-        return;
-      }
-      if (meta && e.key.toLowerCase() === "g") {
-        e.preventDefault();
-        if (selectedIdsRef.current.length > 1) {
-          const gid = genId();
-          beginChange();
-          setElements((prev) => prev.map((el) => (selectedIdsRef.current.includes(el.id) ? { ...el, groupId: gid } : el)));
-          endChange();
-        }
-        return;
-      }
-      if (meta && e.key.toLowerCase() === "l") {
-        e.preventDefault();
-        if (selectedIdsRef.current.length > 0) {
-          const selected = elementsRef.current.filter((el) => selectedIdsRef.current.includes(el.id));
-          const allLocked = selected.every((el) => el.locked);
-          beginChange();
-          setElements((prev) => prev.map((el) => (selectedIdsRef.current.includes(el.id) ? { ...el, locked: !allLocked } : el)));
-          endChange();
-          if (!allLocked) setSelectedIds([]); // deselect after locking, since locked elements shouldn't show active handles
-        }
-        return;
-      }
+      if (meta && e.key.toLowerCase() === "g" && e.shiftKey) { e.preventDefault(); ungroupSelected(); return; }
+      if (meta && e.key.toLowerCase() === "g") { e.preventDefault(); groupSelected(); return; }
+      if (meta && e.key.toLowerCase() === "l") { e.preventDefault(); toggleLockSelected(); return; }
       if (meta && e.key.toLowerCase() === "s") { e.preventDefault(); saveNow(); return; }
       if (e.key === "Delete" || e.key === "Backspace") { deleteSelected(); return; }
       if (e.key === "Escape") {
+        // First Escape just dismisses an open context menu, keeping the
+        // selection intact — a second Escape (menu already closed) falls
+        // through to the full reset below.
+        if (contextMenu) { setContextMenu(null); return; }
         setSelectedIds([]); setTool("select"); setLinkDraft(null); setEmbedDraft(null); setInteractingEmbedId(null); setProjectsPanelOpen(false); setPresentationMode(false);
         return;
       }
@@ -2448,7 +2541,17 @@ export default function Whiteboard({ board, boardList }) {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [undo, redo, duplicateSelected, deleteSelected, saveNow, beginChange, endChange]);
+  }, [undo, redo, duplicateSelected, deleteSelected, saveNow, beginChange, endChange, groupSelected, ungroupSelected, toggleLockSelected, contextMenu]);
+
+  /* ---------- context menu: close on outside click ---------- */
+  useEffect(() => {
+    if (!contextMenu) return;
+    const onDocPointerDown = (e) => {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target)) setContextMenu(null);
+    };
+    document.addEventListener("pointerdown", onDocPointerDown);
+    return () => document.removeEventListener("pointerdown", onDocPointerDown);
+  }, [contextMenu]);
 
   /* ---------- save-before-unload ---------- */
   useEffect(() => {
@@ -2651,6 +2754,8 @@ export default function Whiteboard({ board, boardList }) {
   }, [selectedElements, tool]);
   const showPanel = effectiveType !== null;
   const singleSelected = selectedElements.length === 1 ? selectedElements[0] : null;
+  const isGroupedSelection = selectedElements.length > 1 && selectedElements.every((el) => el.groupId && el.groupId === selectedElements[0].groupId);
+  const isLockedSelection = selectedElements.length > 0 && selectedElements.every((el) => el.locked);
   const worldToScreen = useCallback((x, y) => ({ x: x * zoom + pan.x, y: y * zoom + pan.y }), [zoom, pan]);
 
   const gridSize = 28 * zoom;
@@ -2748,9 +2853,13 @@ export default function Whiteboard({ board, boardList }) {
         .icon-btn-sm { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 6px; border: none; background: transparent; color: ${theme.muted}; cursor: pointer; }
         .icon-btn-sm:hover { background: ${theme.panelBorder}; color: ${theme.ink}; }
         input.proj-name-input { font: inherit; font-size: 13px; color: ${theme.ink}; background: transparent; border: none; border-bottom: 1px solid #4C5FF7; outline: none; padding: 1px 0; width: 100%; }
+        .ctx-item { display: flex; align-items: center; width: 100%; padding: 7px 10px; border: none; background: transparent; color: ${theme.ink}; font-size: 13px; font-family: inherit; text-align: left; border-radius: 6px; cursor: pointer; }
+        .ctx-item:hover { background: ${theme.hover}; }
+        .ctx-item.danger { color: #E5484D; }
+        .ctx-sep { height: 1px; background: ${theme.panelBorder}; margin: 4px 2px; }
       `}</style>
 
-      <svg ref={svgRef} width="100%" height="100%" style={{ cursor: canvasCursor, display: "block" }} onPointerDown={handleCanvasPointerDown}>
+      <svg ref={svgRef} width="100%" height="100%" style={{ cursor: canvasCursor, display: "block" }} onPointerDown={handleCanvasPointerDown} onContextMenu={(e) => { e.preventDefault(); setContextMenu(null); }}>
         <defs>
           <pattern id="dotgrid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse" x={gridOffsetX} y={gridOffsetY}>
             <circle cx="1.2" cy="1.2" r="1.2" fill={gridDot} />
@@ -2774,6 +2883,7 @@ export default function Whiteboard({ board, boardList }) {
                 key={el.id}
                 opacity={el.opacity}
                 onPointerDown={(e) => handleShapePointerDown(e, el)}
+                onContextMenu={(e) => handleShapeContextMenu(e, el)}
                 onPointerEnter={() => { if (toolRef.current === "select") setHoveredElementId(el.id); }}
                 onPointerLeave={() => setHoveredElementId((h) => (h === el.id ? null : h))}
                 style={{ cursor: tool === "select" ? "move" : "inherit" }}
@@ -3139,6 +3249,22 @@ export default function Whiteboard({ board, boardList }) {
             </div>
           )}
 
+          {selectedIds.length >= 2 && (
+            <div>
+              <div className="panel-label">Align</div>
+              <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
+                {ALIGN_ACTIONS.slice(0, 3).map((a) => (
+                  <button key={a.mode} className="seg-btn" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }} title={a.title} onClick={() => alignSelected(a.mode)}><a.icon size={14} /></button>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 4 }}>
+                {ALIGN_ACTIONS.slice(3, 6).map((a) => (
+                  <button key={a.mode} className="seg-btn" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }} title={a.title} onClick={() => alignSelected(a.mode)}><a.icon size={14} /></button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {!STROKELESS_TYPES.includes(effectiveType) && (
             <div>
               <div className="panel-label">Stroke</div>
@@ -3365,6 +3491,39 @@ export default function Whiteboard({ board, boardList }) {
 
       {toast && (
         <div style={{ position: "absolute", bottom: 70, left: "50%", transform: "translateX(-50%)", background: theme.ink, color: theme.appBg, padding: "8px 16px", borderRadius: 10, fontSize: 13, zIndex: 40 }}>{toast}</div>
+      )}
+
+      {contextMenu && (
+        <div
+          ref={contextMenuRef}
+          onPointerDown={(e) => e.stopPropagation()}
+          style={{
+            position: "fixed", left: contextMenu.x, top: contextMenu.y, zIndex: 60,
+            background: theme.panelBg, backdropFilter: "blur(8px)", border: `1px solid ${theme.panelBorder}`,
+            borderRadius: 12, boxShadow: theme.shadow, padding: 6, minWidth: 190,
+            display: "flex", flexDirection: "column", gap: 1,
+          }}
+        >
+          <button className="ctx-item" onClick={() => { duplicateSelected(); setContextMenu(null); }}>Copy</button>
+          <button className="ctx-item" onClick={() => { duplicateSelected(); setContextMenu(null); }}>Duplicate</button>
+          <div className="ctx-sep" />
+          <button className="ctx-item" onClick={() => { reorderSelected("front"); setContextMenu(null); }}>Bring to front</button>
+          <button className="ctx-item" onClick={() => { reorderSelected("forward"); setContextMenu(null); }}>Bring forward</button>
+          <button className="ctx-item" onClick={() => { reorderSelected("backward"); setContextMenu(null); }}>Send backward</button>
+          <button className="ctx-item" onClick={() => { reorderSelected("back"); setContextMenu(null); }}>Send to back</button>
+          {(isGroupedSelection || selectedElements.length > 1) && (
+            <>
+              <div className="ctx-sep" />
+              <button className="ctx-item" onClick={() => { (isGroupedSelection ? ungroupSelected : groupSelected)(); setContextMenu(null); }}>
+                {isGroupedSelection ? "Ungroup" : "Group selection"}
+              </button>
+            </>
+          )}
+          <div className="ctx-sep" />
+          <button className="ctx-item" onClick={() => { toggleLockSelected(); setContextMenu(null); }}>{isLockedSelection ? "Unlock" : "Lock"}</button>
+          <div className="ctx-sep" />
+          <button className="ctx-item danger" onClick={() => { deleteSelected(); setContextMenu(null); }}>Delete</button>
+        </div>
       )}
     </div>
   );
