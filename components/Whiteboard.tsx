@@ -2358,14 +2358,6 @@ export default function Whiteboard({ board, boardList }) {
       if (editingText) finishTextEdit(true);
       if (editingLabel) finishLabelEdit(true);
 
-      if (el.type === "text" && e.detail === 2) { startTextAt(el.x, el.y, el); return; }
-      if (el.type === "link" && e.detail === 2) {
-        if (el.targetId === boardId) return;
-        goToBoard(el.targetId);
-        return;
-      }
-      if (el.type === "embed" && e.detail === 2) { setInteractingEmbedId(el.id); return; }
-
       const groupIds = el.groupId ? elementsRef.current.filter((e) => e.groupId === el.groupId).map((e) => e.id) : [el.id];
       let nextSelected = selectedIdsRef.current;
       if (e.shiftKey) {
@@ -2416,7 +2408,27 @@ export default function Whiteboard({ board, boardList }) {
       });
       beginDrag({ mode: "move", startX: x, startY: y, origins });
     },
-    [beginChange, beginDrag, boardId, editingLabel, editingText, finishLabelEdit, finishTextEdit, goToBoard, screenToWorld, startTextAt]
+    [beginChange, beginDrag, editingLabel, editingText, finishLabelEdit, finishTextEdit, screenToWorld]
+  );
+
+  // Double-click detection for text/link/embed elements must use React's
+  // native onDoubleClick (not onPointerDown + e.detail) — PointerEvent's
+  // `detail` is always 0 in this browser (confirmed via diagnostic
+  // logging), so a `pointerdown`-based click-count check can never fire.
+  // Shape labels already use this same onDoubleClick pattern successfully.
+  const handleShapeDoubleClick = useCallback(
+    (e, el) => {
+      if (el.locked || toolRef.current !== "select") return;
+      e.stopPropagation();
+      if (el.type === "text") { startTextAt(el.x, el.y, el); return; }
+      if (el.type === "link") {
+        if (el.targetId === boardId) return;
+        goToBoard(el.targetId);
+        return;
+      }
+      if (el.type === "embed") { setInteractingEmbedId(el.id); return; }
+    },
+    [boardId, goToBoard, startTextAt]
   );
 
   const handleShapeContextMenu = useCallback(
@@ -2938,6 +2950,7 @@ export default function Whiteboard({ board, boardList }) {
                 key={el.id}
                 opacity={el.opacity}
                 onPointerDown={(e) => handleShapePointerDown(e, el)}
+                onDoubleClick={(e) => handleShapeDoubleClick(e, el)}
                 onContextMenu={(e) => handleShapeContextMenu(e, el)}
                 onPointerEnter={() => { if (toolRef.current === "select") setHoveredElementId(el.id); }}
                 onPointerLeave={() => setHoveredElementId((h) => (h === el.id ? null : h))}
