@@ -522,7 +522,16 @@ function smoothFreehandPath(points) {
   return d;
 }
 export function getBBox(el) {
-  if (el.type === "text") return { x: el.x, y: el.y, w: el.width || 40, h: el.height || 30 };
+  // Height is derived live from the actual wrapped line count rather than
+  // trusting the stored `height` field — that field can drift from what
+  // actually renders (e.g. a boundary-width rounding difference, or a
+  // font-size change that didn't re-wrap), and a stale/undersized bbox here
+  // silently breaks hit-testing (double-click-to-edit, selection) on
+  // whatever line falls outside it.
+  if (el.type === "text") {
+    const w = el.width || 40;
+    return { x: el.x, y: el.y, w, h: textWrappedHeight(el.text, el.fontSize, w) };
+  }
   if (BOX_TYPES.includes(el.type)) return { x: el.x, y: el.y, w: el.w || 40, h: el.h || 30 };
   if (el.type === "line" || el.type === "arrow" || el.type === "freehand") {
     const allPoints = el.elbowWaypoints && el.elbowWaypoints.length ? [...el.points, ...el.elbowWaypoints] : el.points;
@@ -667,8 +676,8 @@ function distToSegment(px, py, x1, y1, x2, y2) {
 }
 function hitTestPoint(el, x, y, threshold) {
   if (el.type === "text") {
-    const pad = threshold, w = el.width || 40, h = el.height || 30;
-    return x >= el.x - pad && x <= el.x + w + pad && y >= el.y - pad && y <= el.y + h + pad;
+    const pad = threshold, b = getBBox(el);
+    return x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad;
   }
   if (BOX_TYPES.includes(el.type)) {
     const pad = threshold;
@@ -999,6 +1008,14 @@ function wrapLabelLines(text, fontSize, maxWidth, precise = true) {
   }
   return lines;
 }
+// Single source of truth for a standalone text element's rendered height —
+// used by getBBox (hit-testing, selection, double-click), the resize drag
+// handlers, and ShapeSvg's render, so the hit area and the visible text can
+// never drift apart.
+function textWrappedHeight(text, fontSize, width, canvasReady = true) {
+  const lines = wrapLabelLines(text, fontSize, Math.max(1, width), canvasReady);
+  return Math.max(fontSize * 1.35, lines.length * fontSize * 1.35);
+}
 // Grows a labeled shape's HEIGHT when its label wraps into more lines than
 // currently fit AT THE BOX'S CURRENT WIDTH — width is never touched here
 // (it's purely user-controlled via manual resize handles). Anchored at the
@@ -1182,12 +1199,13 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
   if (type === "text") {
     const width = el.width || 40;
     const lines = wrapLabelLines(el.text, el.fontSize, width, canvasReady);
+    const height = textWrappedHeight(el.text, el.fontSize, width, canvasReady);
     const align = el.align || "left";
     const tx = align === "left" ? el.x : align === "right" ? el.x + width : el.x + width / 2;
     const textAnchor = align === "left" ? "start" : align === "right" ? "end" : "middle";
     return (
       <>
-        <rect x={el.x} y={el.y} width={width} height={el.height || 30} fill="transparent" style={{ pointerEvents: "all" }} />
+        <rect x={el.x} y={el.y} width={width} height={height} fill="transparent" style={{ pointerEvents: "all" }} />
         <text x={tx} y={el.y + el.fontSize} textAnchor={textAnchor} fontFamily="'Kalam', cursive" fontSize={el.fontSize} fill={el.stroke} style={{ userSelect: "none" }}>
           {lines.map((line, i) => (
             <tspan key={i} x={tx} dy={i === 0 ? 0 : el.fontSize * 1.35}>{line || " "}</tspan>
@@ -2013,8 +2031,7 @@ export default function Whiteboard({ board, boardList }) {
           const h = drag.handle;
           const nw = Math.max(30, h === "e" ? x - o.x : o.x + o.w - x);
           const nx = h === "w" ? o.x + o.w - nw : o.x;
-          const lines = wrapLabelLines(activeEl.text, activeEl.fontSize, nw, canvasReady);
-          const nh = Math.max(activeEl.fontSize * 1.35, lines.length * activeEl.fontSize * 1.35);
+          const nh = textWrappedHeight(activeEl.text, activeEl.fontSize, nw, canvasReady);
           patch = { x: nx, width: nw, height: nh };
         } else if (activeEl && activeEl.type === "text") {
           const o = drag.origin;
@@ -2036,8 +2053,7 @@ export default function Whiteboard({ board, boardList }) {
           // resize had introduced. Re-wrap at the new font size/width to
           // get an accurate height (never a stale or single-line value).
           const nw = Math.max(30, o.w * scale);
-          const lines = wrapLabelLines(activeEl.text, nextFontSize, nw, canvasReady);
-          const nh = Math.max(nextFontSize * 1.35, lines.length * nextFontSize * 1.35);
+          const nh = textWrappedHeight(activeEl.text, nextFontSize, nw, canvasReady);
           const nx = h.includes("w") ? o.x + o.w - nw : o.x;
           const ny = h.includes("n") ? o.y + o.h - nh : o.y;
           patch = { x: nx, y: ny, width: nw, height: nh, fontSize: nextFontSize };
