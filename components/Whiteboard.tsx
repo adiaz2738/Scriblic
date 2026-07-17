@@ -1180,8 +1180,8 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     return <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />;
   }
   if (type === "text") {
-    const lines = el.text.split("\n");
     const width = el.width || 40;
+    const lines = wrapLabelLines(el.text, el.fontSize, width, canvasReady);
     const align = el.align || "left";
     const tx = align === "left" ? el.x : align === "right" ? el.x + width : el.x + width / 2;
     const textAnchor = align === "left" ? "start" : align === "right" ? "end" : "middle";
@@ -2004,6 +2004,18 @@ export default function Whiteboard({ board, boardList }) {
           const pts = [...drag.originPoints];
           pts[drag.handle] = { x, y };
           patch = { points: pts };
+        } else if (activeEl && activeEl.type === "text" && (h => h === "w" || h === "e")(drag.handle)) {
+          // Side handles resize the box's WIDTH only, leaving font size
+          // untouched — the text reflows/wraps within the new width, matching
+          // how side-handle drags work in Word/Canva/Figma (vs. corner
+          // handles below, which scale font size).
+          const o = drag.origin;
+          const h = drag.handle;
+          const nw = Math.max(30, h === "e" ? x - o.x : o.x + o.w - x);
+          const nx = h === "w" ? o.x + o.w - nw : o.x;
+          const lines = wrapLabelLines(activeEl.text, activeEl.fontSize, nw, canvasReady);
+          const nh = Math.max(activeEl.fontSize * 1.35, lines.length * activeEl.fontSize * 1.35);
+          patch = { x: nx, width: nw, height: nh };
         } else if (activeEl && activeEl.type === "text") {
           const o = drag.origin;
           const h = drag.handle;
@@ -2797,11 +2809,16 @@ export default function Whiteboard({ board, boardList }) {
     }
     const b = getBBox(singleSelected);
     const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
-    return [
+    const all = [
       { key: "nw", handle: "nw", wx: b.x, wy: b.y }, { key: "n", handle: "n", wx: cx, wy: b.y }, { key: "ne", handle: "ne", wx: b.x + b.w, wy: b.y },
       { key: "e", handle: "e", wx: b.x + b.w, wy: cy }, { key: "se", handle: "se", wx: b.x + b.w, wy: b.y + b.h }, { key: "s", handle: "s", wx: cx, wy: b.y + b.h },
       { key: "sw", handle: "sw", wx: b.x, wy: b.y + b.h }, { key: "w", handle: "w", wx: b.x, wy: cy },
     ];
+    // Text height is derived from wrapped line count × font size, not a
+    // freely draggable value — hide the n/s (top/bottom middle) handles so
+    // there's nothing to drag independently.
+    if (singleSelected.type === "text") return all.filter((hd) => hd.key !== "n" && hd.key !== "s");
+    return all;
   }, [singleSelected]);
 
   const cursorForHandle = { nw: "nwse-resize", se: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize", n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize" };
