@@ -3048,6 +3048,7 @@ export default function Whiteboard({ board, boardList }) {
       </svg>
 
       {singleSelected &&
+        !(editingText && editingText.id === singleSelected.id) &&
         handlePositions.map((h) => {
           const s = worldToScreen(h.wx, h.wy);
           const isWaypoint = typeof h.handle === "object";
