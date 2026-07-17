@@ -1783,11 +1783,21 @@ export default function Whiteboard({ board, boardList }) {
       // finishLabelEdit already does this correctly.
       const draft = editingTextRef.current;
       if (draft && commit && draft.text.trim() !== "") {
-        const { width, height } = measureText(draft.text, draft.fontSize);
         beginChange();
         if (draft.isNew) {
+          // Brand-new text has no established box yet — auto-size to fit
+          // exactly what was typed, same as before.
+          const { width, height } = measureText(draft.text, draft.fontSize);
           setElements((prev) => [...prev, { id: draft.id, type: "text", x: draft.x, y: draft.y, text: draft.text, fontSize: draft.fontSize, align: draft.align || "left", stroke: draft.stroke, opacity: draft.opacity, width, height }]);
         } else {
+          // Editing an EXISTING element must preserve its current width
+          // (which may have been narrowed via a side-handle resize, causing
+          // wrapped multi-line text) rather than collapsing it back to a
+          // fresh natural/unwrapped single-line width — only the height
+          // (derived from the actual wrapped line count at that width)
+          // needs to change to fit the edited text.
+          const width = draft.width;
+          const height = textWrappedHeight(draft.text, draft.fontSize, width);
           setElements((prev) => prev.map((el) => (el.id === draft.id ? { ...el, text: draft.text, width, height } : el)));
         }
         endChange();
@@ -1800,7 +1810,12 @@ export default function Whiteboard({ board, boardList }) {
 
   const startTextAt = useCallback((x, y, existing) => {
     if (existing) {
-      setEditingText({ id: existing.id, x: existing.x, y: existing.y, text: existing.text, fontSize: existing.fontSize, align: existing.align || "left", stroke: existing.stroke, opacity: existing.opacity, isNew: false });
+      // Carry over the element's CURRENT width so editing a previously
+      // side-handle-narrowed (wrapped, multi-line) text element keeps it
+      // wrapped while typing, instead of the textarea reverting to a
+      // single unwrapped line.
+      const width = existing.width || measureText(existing.text, existing.fontSize).width;
+      setEditingText({ id: existing.id, x: existing.x, y: existing.y, text: existing.text, fontSize: existing.fontSize, align: existing.align || "left", stroke: existing.stroke, opacity: existing.opacity, width, isNew: false });
     } else {
       setEditingText({ id: genId(), x, y, text: "", fontSize: styleRef.current.fontSize, align: styleRef.current.align || "left", stroke: styleRef.current.stroke, opacity: styleRef.current.opacity, isNew: true });
     }
@@ -3074,16 +3089,30 @@ export default function Whiteboard({ board, boardList }) {
           onChange={(e) => setEditingText((d) => ({ ...d, text: e.target.value }))}
           onBlur={() => finishTextEdit(true)}
           onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Escape") { e.currentTarget.blur(); finishTextEdit(false); } }}
-          style={{
-            position: "absolute", left: worldToScreen(editingText.x, editingText.y).x, top: worldToScreen(editingText.x, editingText.y).y,
-            fontFamily: "'Kalam', cursive", fontSize: editingText.fontSize * zoom, lineHeight: 1.35, color: editingText.stroke,
-            textAlign: (editingText.isNew ? editingText.align : elements.find((el) => el.id === editingText.id)?.align) || "left",
-            background: "transparent", border: "none", outline: "1px dashed #4C5FF7", outlineOffset: 4, resize: "none", padding: 0,
-            minWidth: 60, minHeight: editingText.fontSize * zoom * 1.4,
-            width: Math.max(120, measureText(editingText.text || " ", editingText.fontSize).width * zoom),
-            height: Math.max(40, measureText(editingText.text || " ", editingText.fontSize).height * zoom + 10),
-            overflow: "hidden",
-          }}
+          style={(() => {
+            // New text has no established box yet, so the textarea keeps
+            // auto-sizing to fit exactly what's typed (unwrapped), as
+            // before. An EXISTING element keeps its stored width fixed —
+            // letting the textarea's native wrapping show the same
+            // multi-line layout it renders on the canvas, instead of
+            // reverting to one long unwrapped line — and only grows its
+            // height to match the wrapped line count.
+            const editWidth = editingText.isNew
+              ? Math.max(120, measureText(editingText.text || " ", editingText.fontSize).width * zoom)
+              : Math.max(60, editingText.width * zoom);
+            const editHeight = editingText.isNew
+              ? Math.max(40, measureText(editingText.text || " ", editingText.fontSize).height * zoom + 10)
+              : Math.max(40, textWrappedHeight(editingText.text || " ", editingText.fontSize, editingText.width) * zoom + 10);
+            return {
+              position: "absolute", left: worldToScreen(editingText.x, editingText.y).x, top: worldToScreen(editingText.x, editingText.y).y,
+              fontFamily: "'Kalam', cursive", fontSize: editingText.fontSize * zoom, lineHeight: 1.35, color: editingText.stroke,
+              textAlign: (editingText.isNew ? editingText.align : elements.find((el) => el.id === editingText.id)?.align) || "left",
+              background: "transparent", border: "none", outline: "1px dashed #4C5FF7", outlineOffset: 4, resize: "none", padding: 0,
+              minWidth: 60, minHeight: editingText.fontSize * zoom * 1.4,
+              width: editWidth, height: editHeight,
+              overflow: "hidden",
+            };
+          })()}
         />
       )}
 
