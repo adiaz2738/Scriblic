@@ -2030,7 +2030,14 @@ export default function Whiteboard({ board, boardList }) {
           const scaleY = affectsY ? rawH / o.h : null;
           const scale = scaleX !== null && scaleY !== null ? (scaleX + scaleY) / 2 : scaleX !== null ? scaleX : scaleY;
           const nextFontSize = Math.min(400, Math.max(MIN_FONT_SIZE, drag.originFontSize * scale));
-          const { width: nw, height: nh } = measureText(activeEl.text, nextFontSize);
+          // Scale the box's CURRENT width by the same factor rather than
+          // recomputing a fresh natural/unwrapped width from the text —
+          // that would silently collapse any wrapping a prior side-handle
+          // resize had introduced. Re-wrap at the new font size/width to
+          // get an accurate height (never a stale or single-line value).
+          const nw = Math.max(30, o.w * scale);
+          const lines = wrapLabelLines(activeEl.text, nextFontSize, nw, canvasReady);
+          const nh = Math.max(nextFontSize * 1.35, lines.length * nextFontSize * 1.35);
           const nx = h.includes("w") ? o.x + o.w - nw : o.x;
           const ny = h.includes("n") ? o.y + o.h - nh : o.y;
           patch = { x: nx, y: ny, width: nw, height: nh, fontSize: nextFontSize };
