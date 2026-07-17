@@ -983,7 +983,15 @@ function wrapLabelLines(text, fontSize, maxWidth, precise = true) {
       let remaining = word;
       while (remaining.length > 0) {
         const candidate = current ? `${current} ${remaining}` : remaining;
-        if (measure(candidate) <= maxWidth) {
+        // +0.5px tolerance: `maxWidth` for a standalone text element is
+        // itself a `ctx.measureText()` result from a separate call (in
+        // `measureText`, at creation time) on this SAME shared canvas
+        // context — canvas text-metrics rounding isn't guaranteed
+        // bit-identical across two independent measurements of the same
+        // string, so a strict `<=` could spuriously wrap a line that's
+        // supposed to fit exactly, silently changing the rendered layout
+        // (and the invisible hit-rect's height) from what was stored.
+        if (measure(candidate) <= maxWidth + 0.5) {
           current = candidate;
           remaining = "";
         } else if (current !== "") {
