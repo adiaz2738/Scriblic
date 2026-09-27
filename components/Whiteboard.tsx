@@ -521,6 +521,10 @@ function smoothFreehandPath(points) {
   d += `L ${last[0].toFixed(2)} ${last[1].toFixed(2)}`;
   return d;
 }
+// "Fit" export scale target: the longer side of the exported content lands
+// at this many px, regardless of scale.
+const FIT_TARGET_SIZE = 2000;
+
 export function getBBox(el) {
   // Height is derived live from the actual wrapped line count rather than
   // trusting the stored `height` field — that field can drift from what
@@ -540,6 +544,15 @@ export function getBBox(el) {
     return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
   }
   return { x: 0, y: 0, w: 0, h: 0 };
+}
+// Bounding box of a whole element set, padded — shared by every export path
+// (SVG string, canvas rasterization, and the dialog's output-size readout)
+// so they always agree on content size.
+export function getElementsBBox(els, padding = 40) {
+  const boxes = els.map(getBBox);
+  const minX = Math.min(...boxes.map((b) => b.x)) - padding, minY = Math.min(...boxes.map((b) => b.y)) - padding;
+  const maxX = Math.max(...boxes.map((b) => b.x + b.w)) + padding, maxY = Math.max(...boxes.map((b) => b.y + b.h)) + padding;
+  return { minX, minY, w: Math.max(50, maxX - minX), h: Math.max(50, maxY - minY) };
 }
 function rectsIntersect(a, b) {
   return !(a.x + a.w < b.x || b.x + b.w < a.x || a.y + a.h < b.y || b.y + b.h < a.y);
@@ -1298,7 +1311,8 @@ export default function Whiteboard({ board, boardList }) {
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [exportBackground, setExportBackground] = useState(true);
   const [exportDarkMode, setExportDarkMode] = useState(false);
-  const [exportScale, setExportScale] = useState(2);
+  const [exportScale, setExportScale] = useState<number | "fit">("fit");
+  const [exportSelectionOnly, setExportSelectionOnly] = useState(false);
   const [saveStatus, setSaveStatus] = useState("saved"); // idle | saving | saved | error
   const [past, setPast] = useState([]);
   const [future, setFuture] = useState([]);
@@ -2691,14 +2705,11 @@ export default function Whiteboard({ board, boardList }) {
   // `background`/`dark` only affect the export render (bg fill + swapping the
   // default "ink" stroke/fill color for its light-on-dark counterpart) — the
   // live board and its elements are never mutated.
-  const buildBoardSvgString = useCallback((opts: { background?: boolean; dark?: boolean } = {}) => {
-    const { background = true, dark = false } = opts;
-    const els = elementsRef.current;
+  const buildBoardSvgString = useCallback((opts: { background?: boolean; dark?: boolean; elementIds?: string[] } = {}) => {
+    const { background = true, dark = false, elementIds = null } = opts;
+    const els = elementIds ? elementsRef.current.filter((el) => elementIds.includes(el.id)) : elementsRef.current;
     if (els.length === 0) throw new Error("Nothing to export yet");
-    const boxes = els.map(getBBox);
-    const minX = Math.min(...boxes.map((b) => b.x)) - 40, minY = Math.min(...boxes.map((b) => b.y)) - 40;
-    const maxX = Math.max(...boxes.map((b) => b.x + b.w)) + 40, maxY = Math.max(...boxes.map((b) => b.y + b.h)) + 40;
-    const w = Math.max(50, maxX - minX), h = Math.max(50, maxY - minY);
+    const { minX, minY, w, h } = getElementsBBox(els);
 
     const svgNS = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(svgNS, "svg");
@@ -2716,6 +2727,16 @@ export default function Whiteboard({ board, boardList }) {
     if (contentGroup) {
       const clone = contentGroup.cloneNode(true) as Element;
       clone.querySelectorAll("iframe").forEach((f) => f.remove());
+      // Export must never include selection outlines, hover/bind indicators,
+      // drafts, or alignment guides — strip the entire UI-overlay group
+      // regardless of what's currently selected/hovered on the live board.
+      clone.querySelectorAll("[data-ui-overlay]").forEach((n) => n.remove());
+      if (elementIds) {
+        const idSet = new Set(elementIds);
+        clone.querySelectorAll("[data-el-id]").forEach((n) => {
+          if (!idSet.has(n.getAttribute("data-el-id"))) n.remove();
+        });
+      }
       if (dark) {
         // The board has no per-element "theme" — el.stroke/el.fill are fixed
         // hex values from the swatch palette. The only one theme-dependent
@@ -2736,30 +2757,42 @@ export default function Whiteboard({ board, boardList }) {
     return new XMLSerializer().serializeToString(svg);
   }, []);
 
-  const buildBoardCanvas = useCallback((opts: { background?: boolean; dark?: boolean; scale?: number } = {}) => {
-    const { background = true, dark = false, scale = 2 } = opts;
+  // Resolves the requested scale (a flat multiplier, or "fit" — which sizes
+  // the longer side of the exported content to FIT_TARGET_SIZE px) against
+  // actual content dimensions, and returns the exact output pixel size. Pure
+  // and synchronous so both the canvas builder and the dialog's on-screen
+  // "Output: WxH" readout compute the identical number.
+  const getExportOutputSize = useCallback((opts: { scale?: number | "fit"; elementIds?: string[] } = {}) => {
+    const { scale = 2, elementIds = null } = opts;
+    const els = elementIds ? elementsRef.current.filter((el) => elementIds.includes(el.id)) : elementsRef.current;
+    if (els.length === 0) return null;
+    const { w, h } = getElementsBBox(els);
+    const resolvedScale = scale === "fit" ? FIT_TARGET_SIZE / Math.max(w, h) : scale;
+    return { width: Math.round(w * resolvedScale), height: Math.round(h * resolvedScale), resolvedScale };
+  }, []);
+
+  const buildBoardCanvas = useCallback((opts: { background?: boolean; dark?: boolean; scale?: number | "fit"; elementIds?: string[] } = {}) => {
+    const { background = true, dark = false, scale = 2, elementIds = null } = opts;
     return new Promise<HTMLCanvasElement>((resolve, reject) => {
       try {
-        const els = elementsRef.current;
+        const els = elementIds ? elementsRef.current.filter((el) => elementIds.includes(el.id)) : elementsRef.current;
         if (els.length === 0) { reject(new Error("Nothing to export yet")); return; }
-        const boxes = els.map(getBBox);
-        const minX = Math.min(...boxes.map((b) => b.x)) - 40, minY = Math.min(...boxes.map((b) => b.y)) - 40;
-        const maxX = Math.max(...boxes.map((b) => b.x + b.w)) + 40, maxY = Math.max(...boxes.map((b) => b.y + b.h)) + 40;
-        const w = Math.max(50, maxX - minX), h = Math.max(50, maxY - minY);
+        const { w, h } = getElementsBBox(els);
+        const resolvedScale = scale === "fit" ? FIT_TARGET_SIZE / Math.max(w, h) : scale;
 
-        const svgString = buildBoardSvgString({ background, dark });
+        const svgString = buildBoardSvgString({ background, dark, elementIds });
         const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
         const url = URL.createObjectURL(svgBlob);
         const img = new Image();
         img.onload = () => {
           const canvas = document.createElement("canvas");
-          canvas.width = w * scale; canvas.height = h * scale;
+          canvas.width = w * resolvedScale; canvas.height = h * resolvedScale;
           const ctx = canvas.getContext("2d");
           if (background) {
             ctx.fillStyle = dark ? DARK.appBg : canvasBgRef.current;
             ctx.fillRect(0, 0, canvas.width, canvas.height);
           }
-          ctx.scale(scale, scale);
+          ctx.scale(resolvedScale, resolvedScale);
           ctx.drawImage(img, 0, 0, w, h);
           URL.revokeObjectURL(url);
           resolve(canvas);
@@ -2772,18 +2805,21 @@ export default function Whiteboard({ board, boardList }) {
     });
   }, [buildBoardSvgString]);
 
-  const exportPNG = useCallback(async (opts?: { background?: boolean; dark?: boolean; scale?: number }) => {
+  const exportPNG = useCallback(async (opts?: { background?: boolean; dark?: boolean; scale?: number | "fit"; elementIds?: string[] }) => {
     try {
       const canvas = await buildBoardCanvas(opts);
       const dataUrl = canvas.toDataURL("image/png");
       const a = document.createElement("a");
-      a.href = dataUrl; a.download = "board.png"; a.click();
+      // Dimensions in the filename make each export's scale unmistakable —
+      // otherwise repeated downloads all land as "board.png"/"board (1).png"
+      // and it's easy to compare the wrong two files.
+      a.href = dataUrl; a.download = `board-${canvas.width}x${canvas.height}.png`; a.click();
     } catch (err) {
       setToast("Export failed — try again");
     }
   }, [buildBoardCanvas]);
 
-  const exportSVGFile = useCallback((opts?: { background?: boolean; dark?: boolean }) => {
+  const exportSVGFile = useCallback((opts?: { background?: boolean; dark?: boolean; elementIds?: string[] }) => {
     try {
       const svgString = buildBoardSvgString(opts);
       const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
@@ -2796,7 +2832,7 @@ export default function Whiteboard({ board, boardList }) {
     }
   }, [buildBoardSvgString]);
 
-  const copyPNG = useCallback(async (opts?: { background?: boolean; dark?: boolean; scale?: number }) => {
+  const copyPNG = useCallback(async (opts?: { background?: boolean; dark?: boolean; scale?: number | "fit"; elementIds?: string[] }) => {
     try {
       const canvas = await buildBoardCanvas(opts);
       canvas.toBlob(async (blob) => {
@@ -2963,6 +2999,7 @@ export default function Whiteboard({ board, boardList }) {
             return (
               <g
                 key={el.id}
+                data-el-id={el.id}
                 opacity={el.opacity}
                 onPointerDown={(e) => handleShapePointerDown(e, el)}
                 onDoubleClick={(e) => handleShapeDoubleClick(e, el)}
@@ -2976,6 +3013,10 @@ export default function Whiteboard({ board, boardList }) {
             );
           })}
 
+          {/* Selection/hover/draft/guide UI only — never part of the exported
+              output. Grouped under one marker so export can strip it in one
+              step regardless of what's inside. */}
+          <g data-ui-overlay="true">
           {(() => {
             const indicatorArrows = elements.filter(
               (el) =>
@@ -3059,6 +3100,7 @@ export default function Whiteboard({ board, boardList }) {
               )}
             </g>
           )}
+          </g>
         </g>
       </svg>
 
@@ -3324,7 +3366,7 @@ export default function Whiteboard({ board, boardList }) {
         <div style={{ width: 1, background: theme.panelBorder, margin: "4px 3px" }} />
         <button className="tb-btn" title="Save as… (.json)" onClick={exportJSON}><Save size={18} /></button>
         <button className="tb-btn" title="Import a board (.json)" onClick={() => jsonInputRef.current?.click()}><Upload size={18} /></button>
-        <button className="tb-btn" title="Export image" onClick={() => setExportDialogOpen(true)}><ImageDown size={18} /></button>
+        <button className="tb-btn" title="Export image" onClick={() => { setExportSelectionOnly(selectedIds.length > 0); setExportDialogOpen(true); }}><ImageDown size={18} /></button>
         <div style={{ width: 1, background: theme.panelBorder, margin: "4px 3px" }} />
         <button className="tb-btn" title="Clear board" onClick={clearCanvas}><Trash2 size={18} /></button>
         <button className={`tb-btn${presentationMode ? " active" : ""}`} title="Presentation mode" onClick={() => setPresentationMode((v) => !v)}><Presentation size={18} /></button>
@@ -3636,13 +3678,17 @@ export default function Whiteboard({ board, boardList }) {
       )}
 
       {exportDialogOpen && (() => {
+        const hasSelection = selectedIds.length > 0;
+        const selectionOnly = hasSelection && exportSelectionOnly;
+        const elementIds = selectionOnly ? selectedIds : null;
         let previewSvg: string | null = null;
         try {
-          previewSvg = buildBoardSvgString({ background: exportBackground, dark: exportDarkMode });
+          previewSvg = buildBoardSvgString({ background: exportBackground, dark: exportDarkMode, elementIds });
         } catch {
           previewSvg = null;
         }
-        const opts = { background: exportBackground, dark: exportDarkMode, scale: exportScale };
+        const opts = { background: exportBackground, dark: exportDarkMode, scale: exportScale, elementIds };
+        const outputSize = getExportOutputSize({ scale: exportScale, elementIds });
         return (
           <div
             style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center" }}
@@ -3664,6 +3710,16 @@ export default function Whiteboard({ board, boardList }) {
                   <span style={{ fontSize: 12, color: theme.muted }}>Nothing to export yet</span>
                 )}
               </div>
+
+              {hasSelection && (
+                <div style={{ marginBottom: 16 }}>
+                  <div className="panel-label">Content</div>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <button className={`seg-btn${!exportSelectionOnly ? " on" : ""}`} onClick={() => setExportSelectionOnly(false)}>Whole board</button>
+                    <button className={`seg-btn${exportSelectionOnly ? " on" : ""}`} onClick={() => setExportSelectionOnly(true)}>Selection only</button>
+                  </div>
+                </div>
+              )}
 
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
                 <div className="panel-label" style={{ marginBottom: 0 }}>Background</div>
@@ -3688,8 +3744,14 @@ export default function Whiteboard({ board, boardList }) {
               </div>
 
               <div style={{ marginBottom: 16 }}>
-                <div className="panel-label">Scale</div>
-                <div style={{ display: "flex", gap: 4 }}>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+                  <div className="panel-label" style={{ marginBottom: 0 }}>Scale</div>
+                  {outputSize && (
+                    <span style={{ fontSize: 11, color: theme.muted, fontFamily: "monospace" }}>{outputSize.width} × {outputSize.height}px</span>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+                  <button className={`seg-btn${exportScale === "fit" ? " on" : ""}`} onClick={() => setExportScale("fit")} title="Scale so the longer side is ~2000px, regardless of content size">Fit</button>
                   {[1, 2, 3].map((s) => (
                     <button key={s} className={`seg-btn${exportScale === s ? " on" : ""}`} onClick={() => setExportScale(s)}>{s}x</button>
                   ))}
