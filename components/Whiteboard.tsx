@@ -52,6 +52,7 @@ import {
   AlignVerticalJustifyStart,
   AlignVerticalJustifyCenter,
   AlignVerticalJustifyEnd,
+  Frame as FrameIcon,
 } from "lucide-react";
 
 /* ---------------------------------------------------------------
@@ -102,6 +103,12 @@ const FILL_COLORS = [
   { name: "Teal", value: "#E7F8F5" },
   { name: "Amber", value: "#FDF3E3" },
   { name: "Rose", value: "#FCEAEA" },
+  // Solid/saturated fills for grouping boxes by role/category. Labels on
+  // these switch to light text automatically (see labelColorFor).
+  { name: "Solid Gray", value: "#5B6270" },
+  { name: "Solid Blue", value: "#2F5FD0" },
+  { name: "Solid Green", value: "#2E8B57" },
+  { name: "Solid Orange", value: "#D9730D" },
 ];
 
 const STROKE_WIDTHS = [
@@ -153,6 +160,7 @@ const TOOLS = [
   { id: "arrow", icon: ArrowRight, label: "Arrow", key: "5" },
   { id: "line", icon: Minus, label: "Line", key: "6" },
   { id: "freehand", icon: Pencil, label: "Draw", key: "7" },
+  { id: "frame", icon: FrameIcon, label: "Frame (labeled section)", key: "f" },
   { id: "text", icon: Type, label: "Text", key: "8" },
   { id: "eraser", icon: Eraser, label: "Eraser", key: "9" },
   { id: "laser", icon: Flashlight, label: "Laser", key: "k" },
@@ -162,11 +170,16 @@ const FILL_TYPES = ["rectangle", "diamond", "ellipse"];
 const WEIGHT_TYPES = ["rectangle", "diamond", "ellipse", "line", "arrow", "freehand"];
 const SKETCH_TYPES = ["rectangle", "diamond", "ellipse", "line", "arrow"];
 const STROKELESS_TYPES = ["image", "embed"];
-const BOX_TYPES = ["rectangle", "diamond", "ellipse", "text", "image", "embed", "link"];
+const BOX_TYPES = ["rectangle", "diamond", "ellipse", "text", "image", "embed", "link", "frame"];
 const ALIGNABLE_TYPES = ["rectangle", "diamond", "ellipse", "text"];
 const LABELABLE_TYPES = ["rectangle", "diamond", "ellipse"];
 const EDGE_TYPES = ["rectangle", "diamond"];
 const EDGES = [{ label: "Sharp", value: "sharp" }, { label: "Round", value: "round" }];
+// Frame label strip (top-left of a frame): fixed font, height of the strip,
+// and the widest it's allowed to render/edit before being clipped to the frame.
+const FRAME_LABEL_FONT = 15;
+const FRAME_LABEL_H = 28;
+const FRAME_LABEL_MAX_W = 320;
 
 // Minimum distance a DEFAULT (auto-computed) elbow path extends past a
 // bound shape's edge before it's allowed to bend — without this, two
@@ -417,6 +430,22 @@ function defaultStrokeForBg(bgHex) {
   const paper = STROKE_COLORS.find((c) => c.name === "Paper").value;
   const graphite = STROKE_COLORS.find((c) => c.name === "Graphite").value;
   return relativeLuminance(bgHex) < 0.5 ? paper : graphite;
+}
+// Label text color for a shape: normally the shape's stroke, but on a dark
+// solid fill the stroke (e.g. graphite) would be unreadable, so use a light
+// color there instead. Mirrors defaultStrokeForBg's luminance threshold.
+function labelColorFor(el) {
+  if (el.fill && /^#[0-9a-fA-F]{6}$/.test(el.fill) && relativeLuminance(el.fill) < 0.5) return "#FFFFFF";
+  return el.stroke;
+}
+// Elements fully inside a frame's bounds (excluding the frame itself) —
+// these travel with the frame when it's dragged.
+function elementsInsideFrame(frame, all) {
+  return all.filter((o) => {
+    if (o.id === frame.id || o.locked) return false;
+    const b = getBBox(o);
+    return b.x >= frame.x && b.y >= frame.y && b.x + b.w <= frame.x + frame.w && b.y + b.h <= frame.y + frame.h;
+  });
 }
 
 /* ---------------------------------------------------------------
@@ -691,6 +720,15 @@ function hitTestPoint(el, x, y, threshold) {
   if (el.type === "text") {
     const pad = threshold, b = getBBox(el);
     return x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad;
+  }
+  if (el.type === "frame") {
+    // Border + label strip only — the interior must stay click-through so
+    // the eraser and canvas interactions reach elements sitting inside.
+    const pad = Math.max(threshold, 6);
+    const inOuter = x >= el.x - pad && x <= el.x + el.w + pad && y >= el.y - pad && y <= el.y + el.h + pad;
+    const inInner = x > el.x + pad && x < el.x + el.w - pad && y > el.y + pad && y < el.y + el.h - pad;
+    const inLabel = !!el.label && x >= el.x && x <= el.x + Math.min(el.w, FRAME_LABEL_MAX_W) && y >= el.y && y <= el.y + FRAME_LABEL_H;
+    return (inOuter && !inInner) || inLabel;
   }
   if (BOX_TYPES.includes(el.type)) {
     const pad = threshold;
@@ -1055,6 +1093,8 @@ function fitLabelBoxHeight(box, text, fontSize) {
 }
 function createShapeElement(type, x, y, style) {
   const base = { id: genId(), type, stroke: style.stroke, fill: style.fill, strokeWidth: style.strokeWidth, roughness: style.roughness, opacity: style.opacity, seed: Math.floor(Math.random() * 100000) + 1 };
+  // Frames are a lightweight container: no fill, thin dashed border.
+  if (type === "frame") return { ...base, fill: "transparent", strokeWidth: 1.5, x, y, w: 0, h: 0 };
   if (type === "rectangle" || type === "diamond" || type === "ellipse") return { ...base, x, y, w: 0, h: 0, edges: style.edges };
   if (type === "arrow") return { ...base, points: [{ x, y }, { x, y }], elbowWaypoints: null, manuallyRouted: false };
   if (type === "line") return { ...base, points: [{ x, y }, { x, y }] };
@@ -1117,7 +1157,7 @@ function ShapeLabel({ el, hidden, canvasReady }) {
   const tx = align === "left" ? el.x + LABEL_PADDING : align === "right" ? el.x + el.w - LABEL_PADDING : el.x + el.w / 2;
   const textAnchor = align === "left" ? "start" : align === "right" ? "end" : "middle";
   return (
-    <text x={tx} y={startY} textAnchor={textAnchor} dominantBaseline="middle" fontFamily="'Kalam', cursive" fontSize={fontSize} fill={el.stroke} style={{ userSelect: "none", pointerEvents: "none" }}>
+    <text x={tx} y={startY} textAnchor={textAnchor} dominantBaseline="middle" fontFamily="'Kalam', cursive" fontSize={fontSize} fill={labelColorFor(el)} style={{ userSelect: "none", pointerEvents: "none" }}>
       {lines.map((line, i) => (
         <tspan key={i} x={tx} y={startY + i * lineHeight}>{line || " "}</tspan>
       ))}
@@ -1126,6 +1166,23 @@ function ShapeLabel({ el, hidden, canvasReady }) {
 }
 export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoubleClick, isSelected = false, elbowStartSide = undefined, elbowEndSide = undefined, canvasReady = false }) {
   const { type, seed, roughness } = el;
+  if (type === "frame") {
+    const labelW = Math.min(el.w - 16, FRAME_LABEL_MAX_W);
+    return (
+      <>
+        {/* Border-only hit area: stroke events, no fill, so the interior is click-through. */}
+        <rect x={el.x} y={el.y} width={el.w} height={el.h} rx={14} fill="none" stroke="transparent" strokeWidth={12} style={{ pointerEvents: "stroke", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        <rect x={el.x} y={el.y} width={el.w} height={el.h} rx={14} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeDasharray="8 6" style={{ pointerEvents: "none" }} />
+        {/* Label strip is always present as a hit target (even when empty) so an unlabeled frame can be labeled by double-clicking its top-left corner. */}
+        <rect x={el.x} y={el.y} width={Math.max(0, labelW)} height={FRAME_LABEL_H} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+        {el.label && !hideLabel && (
+          <text x={el.x + 12} y={el.y + FRAME_LABEL_H / 2 + 1} dominantBaseline="middle" fontFamily="'Kalam', cursive" fontSize={FRAME_LABEL_FONT} fill={el.stroke} style={{ userSelect: "none", pointerEvents: "none" }}>
+            {el.label}
+          </text>
+        )}
+      </>
+    );
+  }
   if (type === "rectangle") {
     const pts = [[el.x, el.y], [el.x + el.w, el.y], [el.x + el.w, el.y + el.h], [el.x, el.y + el.h]];
     const radius = el.edges === "round" ? Math.min(28, Math.min(el.w, el.h) * 0.16) : 0;
@@ -1841,6 +1898,12 @@ export default function Whiteboard({ board, boardList }) {
       if (!draft) return;
       if (commit) {
         const text = draft.text.trim();
+        if (draft.frame) {
+          setElements(elementsRef.current.map((el) => (el.id === draft.id ? { ...el, label: text === "" ? undefined : text } : el)));
+          endChange();
+          setEditingLabel(null);
+          return;
+        }
         setElements(
           elementsRef.current.map((el) => {
             if (el.id !== draft.id) return el;
@@ -1861,9 +1924,15 @@ export default function Whiteboard({ board, boardList }) {
 
   const startLabelEdit = useCallback(
     (el) => {
-      const b = getBBox(el);
       beginChange();
-      setEditingLabel({ id: el.id, x: b.x, y: b.y, w: b.w, h: b.h, text: el.label || "", fontSize: el.labelFontSize || 16, stroke: el.stroke });
+      if (el.type === "frame") {
+        // Edit box is just the label strip; `frame: true` tells the commit/
+        // change handlers to leave the frame's own geometry alone.
+        setEditingLabel({ id: el.id, frame: true, x: el.x, y: el.y, w: Math.min(el.w, FRAME_LABEL_MAX_W), h: FRAME_LABEL_H, text: el.label || "", fontSize: FRAME_LABEL_FONT, stroke: el.stroke });
+        return;
+      }
+      const b = getBBox(el);
+      setEditingLabel({ id: el.id, x: b.x, y: b.y, w: b.w, h: b.h, text: el.label || "", fontSize: el.labelFontSize || 16, stroke: labelColorFor(el) });
     },
     [beginChange]
   );
@@ -1871,6 +1940,13 @@ export default function Whiteboard({ board, boardList }) {
   const onLabelTextChange = useCallback((text) => {
     const draft = editingLabelRef.current;
     if (!draft) return;
+    if (draft.frame) {
+      // Frame labels are single-line and never resize the frame.
+      const oneLine = text.replace(/\n/g, " ");
+      setElements(elementsRef.current.map((el) => (el.id === draft.id ? { ...el, label: oneLine } : el)));
+      setEditingLabel({ ...draft, text: oneLine });
+      return;
+    }
     const fitted = fitLabelBoxHeight(draft, text, draft.fontSize);
     // Write `label` onto the actual element live (not just at commit) so
     // sidebar controls gated on `el.label` (Label size/align) show up while
@@ -1904,7 +1980,7 @@ export default function Whiteboard({ board, boardList }) {
         // another shape is already selected (extra handles/overlays re-rendering).
         let guides = null;
         let patch = null;
-        if (drag.elType === "rectangle" || drag.elType === "diamond" || drag.elType === "ellipse") {
+        if (drag.elType === "rectangle" || drag.elType === "diamond" || drag.elType === "ellipse" || drag.elType === "frame") {
           const rawW = x - drag.startX, rawH = y - drag.startY;
           let w = Math.abs(rawW), h = Math.abs(rawH);
           if (e.shiftKey) {
@@ -2176,7 +2252,15 @@ export default function Whiteboard({ board, boardList }) {
       if (drag.mode === "marquee") {
         const rect = { x: Math.min(drag.startX, x), y: Math.min(drag.startY, y), w: Math.abs(x - drag.startX), h: Math.abs(y - drag.startY) };
         setMarquee(rect);
-        const hits = elementsRef.current.filter((el) => rectsIntersect(getBBox(el), rect)).map((el) => el.id);
+        // A frame is only picked up when the marquee fully encloses it —
+        // otherwise any marquee started inside a frame would select the frame.
+        const hits = elementsRef.current
+          .filter((el) => {
+            const b = getBBox(el);
+            if (el.type === "frame") return b.x >= rect.x && b.y >= rect.y && b.x + b.w <= rect.x + rect.w && b.y + b.h <= rect.y + rect.h;
+            return rectsIntersect(b, rect);
+          })
+          .map((el) => el.id);
         const hitGroupIds = new Set(elementsRef.current.filter((el) => hits.includes(el.id) && el.groupId).map((el) => el.groupId));
         const expanded = elementsRef.current.filter((el) => hits.includes(el.id) || (el.groupId && hitGroupIds.has(el.groupId))).map((el) => el.id);
         setSelectedIds(expanded);
@@ -2373,7 +2457,8 @@ export default function Whiteboard({ board, boardList }) {
       }
       const el = createShapeElement(t, x, y, styleRef.current);
       beginChange();
-      setElements((prev) => [...prev, el]);
+      // Frames sit behind everything else: insert at the back of the z-order.
+      setElements((prev) => (el.type === "frame" ? [el, ...prev] : [...prev, el]));
       beginDrag({ mode: "shape-draw", id: el.id, elType: el.type, startX: x, startY: y, arrowDraw: t === "arrow" });
     },
     [beginChange, beginDrag, editingLabel, editingText, embedDraft, finishLabelEdit, finishTextEdit, interactingEmbedId, linkDraft, projectsPanelOpen, refreshProjects, screenToWorld, startTextAt]
@@ -2399,12 +2484,21 @@ export default function Whiteboard({ board, boardList }) {
       const { x, y } = screenToWorld(e.clientX, e.clientY);
       beginChange();
 
+      // Dragging a frame also carries everything fully inside its bounds
+      // (automatic spatial containment, no manual grouping). The carried
+      // elements aren't added to the selection — they just move along.
+      const carriedIds = new Set();
+      elementsRef.current.forEach((f) => {
+        if (f.type === "frame" && nextSelected.includes(f.id)) elementsInsideFrame(f, elementsRef.current).forEach((o) => carriedIds.add(o.id));
+      });
+      const movingIds = [...new Set([...nextSelected, ...carriedIds])];
+
       // Alt+drag duplicates whatever is (about to be) selected and drags the
       // copies, leaving the originals in place — applies uniformly to every
       // element type since it's keyed only on selection + the modifier key,
       // never on el.type.
       if (e.altKey && nextSelected.length > 0) {
-        const originals = elementsRef.current.filter((it) => nextSelected.includes(it.id));
+        const originals = elementsRef.current.filter((it) => movingIds.includes(it.id));
         const idMap = new Map(originals.map((it) => [it.id, genId()]));
         const dupes = originals.map((it) => {
           const clone = { ...it, id: idMap.get(it.id) };
@@ -2433,7 +2527,7 @@ export default function Whiteboard({ board, boardList }) {
       setSelectedIds(nextSelected);
       const origins = {};
       elementsRef.current.forEach((it) => {
-        if (nextSelected.includes(it.id)) origins[it.id] = it.points ? { points: it.points.map((p) => ({ ...p })), elbowWaypoints: it.elbowWaypoints ? it.elbowWaypoints.map((p) => ({ ...p })) : null } : { x: it.x, y: it.y };
+        if (movingIds.includes(it.id)) origins[it.id] = it.points ? { points: it.points.map((p) => ({ ...p })), elbowWaypoints: it.elbowWaypoints ? it.elbowWaypoints.map((p) => ({ ...p })) : null } : { x: it.x, y: it.y };
       });
       beginDrag({ mode: "move", startX: x, startY: y, origins });
     },
@@ -3168,14 +3262,18 @@ export default function Whiteboard({ board, boardList }) {
             value={editingLabel.text}
             onChange={(e) => onLabelTextChange(e.target.value)}
             onBlur={() => finishLabelEdit(true)}
-            onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Escape") { e.currentTarget.blur(); finishLabelEdit(false); } }}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Escape") { e.currentTarget.blur(); finishLabelEdit(false); }
+              else if (editingLabel.frame && e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); }
+            }}
             style={{
               position: "absolute", left: worldToScreen(editingLabel.x, editingLabel.y).x, top: worldToScreen(editingLabel.x, editingLabel.y).y,
               width: editingLabel.w * zoom, height: editingLabel.h * zoom, boxSizing: "border-box",
-              fontFamily: "'Kalam', cursive", fontSize: editingLabel.fontSize * zoom, lineHeight: `${lineHeightPx}px`, color: editingLabel.stroke,
-              textAlign: liveAlign, background: "transparent", border: "1px dashed #4C5FF7", resize: "none", outline: "none",
-              wordBreak: "break-word", overflowWrap: "break-word",
-              padding: `${Math.max(0, (editingLabel.h * zoom - wrapped.length * lineHeightPx) / 2)}px ${LABEL_PADDING * zoom}px`,
+              fontFamily: "'Kalam', cursive", fontSize: editingLabel.fontSize * zoom, lineHeight: editingLabel.frame ? `${editingLabel.h * zoom - 2}px` : `${lineHeightPx}px`, color: editingLabel.stroke,
+              textAlign: editingLabel.frame ? "left" : liveAlign, background: "transparent", border: "1px dashed #4C5FF7", resize: "none", outline: "none",
+              wordBreak: "break-word", overflowWrap: "break-word", whiteSpace: editingLabel.frame ? "nowrap" : undefined,
+              padding: editingLabel.frame ? `0 ${12 * zoom - 1}px` : `${Math.max(0, (editingLabel.h * zoom - wrapped.length * lineHeightPx) / 2)}px ${LABEL_PADDING * zoom}px`,
               overflow: "hidden",
             }}
           />
