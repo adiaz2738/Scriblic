@@ -434,8 +434,15 @@ function defaultStrokeForBg(bgHex) {
 // Label text color for a shape: normally the shape's stroke, but on a dark
 // solid fill the stroke (e.g. graphite) would be unreadable, so use a light
 // color there instead. Mirrors defaultStrokeForBg's luminance threshold.
+// Computed live at render time (never stored). With an opaque fill, the fill
+// alone decides the text color — NOT el.stroke, because a theme/background
+// toggle rewrites default-colored strokes (graphite <-> paper) in the stored
+// element data, which would leave e.g. light text on a pastel fill. With no
+// fill the label sits on the canvas, where the stroke already tracks the theme.
 function labelColorFor(el) {
-  if (el.fill && /^#[0-9a-fA-F]{6}$/.test(el.fill) && relativeLuminance(el.fill) < 0.5) return "#FFFFFF";
+  if (el.fill && /^#[0-9a-fA-F]{6}$/.test(el.fill)) {
+    return relativeLuminance(el.fill) < 0.5 ? "#FFFFFF" : STROKE_COLORS[0].value;
+  }
   return el.stroke;
 }
 // Elements fully inside a frame's bounds (excluding the frame itself) —
@@ -1138,6 +1145,27 @@ function downscaleImageFile(file) {
   });
 }
 
+// Strict shape check for JSON import: Scriblic's own export wrapper
+// ({version, name, elements, canvasBg}) AND every element's required fields.
+// Foreign formats (e.g. raw Excalidraw: strokeColor/width/height/relative
+// points) fail here instead of being loaded and crashing the renderer.
+const IMPORTABLE_TYPES = ["rectangle", "diamond", "ellipse", "line", "arrow", "freehand", "text", "image", "embed", "link", "frame"];
+const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+const isPt = (p) => !!p && isNum(p.x) && isNum(p.y);
+function isValidScriblicElement(el) {
+  if (!el || typeof el !== "object" || typeof el.id !== "string" || !IMPORTABLE_TYPES.includes(el.type)) return false;
+  if ("strokeColor" in el || "backgroundColor" in el) return false; // Excalidraw field names
+  if (el.type === "line" || el.type === "arrow") return Array.isArray(el.points) && el.points.length >= 2 && el.points.every(isPt);
+  if (el.type === "freehand") return Array.isArray(el.points) && el.points.length >= 1 && el.points.every(isPt);
+  if (el.type === "text") return isNum(el.x) && isNum(el.y) && typeof el.text === "string";
+  return isNum(el.x) && isNum(el.y) && isNum(el.w) && isNum(el.h);
+}
+function isScriblicExport(parsed) {
+  if (!parsed || typeof parsed !== "object" || parsed.type === "excalidraw") return false;
+  if (!isNum(parsed.version) || !Array.isArray(parsed.elements)) return false;
+  return parsed.elements.every(isValidScriblicElement);
+}
+
 /* ---------------------------------------------------------------
    Shape renderer
 ----------------------------------------------------------------*/
@@ -1192,10 +1220,10 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
         <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         {el.fill !== "transparent" && (
           radius > 0
-            ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
-            : <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={el.fill} stroke="none" />
+            ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+            : <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={el.fill} stroke="none" onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         )}
-        <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+        <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         <ShapeLabel el={el} hidden={hideLabel} canvasReady={canvasReady} />
       </>
     );
@@ -1209,10 +1237,10 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
         <rect x={el.x} y={el.y} width={el.w} height={el.h} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         {el.fill !== "transparent" && (
           radius > 0
-            ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" />
-            : <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={el.fill} stroke="none" />
+            ? <path d={roundedPolygonPath(pts, radius)} fill={el.fill} stroke="none" onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
+            : <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={el.fill} stroke="none" onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         )}
-        <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+        <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         <ShapeLabel el={el} hidden={hideLabel} canvasReady={canvasReady} />
       </>
     );
@@ -1224,13 +1252,18 @@ export function ShapeSvg({ el, theme, isEmbedInteracting, hideLabel, onLabelDoub
     return (
       <>
         <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill="transparent" style={{ pointerEvents: "all", cursor: "move" }} onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
-        {el.fill !== "transparent" && <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill={el.fill} stroke="none" />}
-        <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+        {el.fill !== "transparent" && <ellipse cx={cx} cy={cy} rx={el.w / 2} ry={el.h / 2} fill={el.fill} stroke="none" onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />}
+        <path d={d} fill="none" stroke={el.stroke} strokeWidth={el.strokeWidth} strokeLinecap="round" strokeLinejoin="round" onDoubleClick={(e) => { e.stopPropagation(); onLabelDoubleClick(el); }} />
         <ShapeLabel el={el} hidden={hideLabel} canvasReady={canvasReady} />
       </>
     );
   }
   if (type === "line" || type === "arrow") {
+    // Malformed element (missing/short points): skip it rather than crash the board.
+    if (!Array.isArray(el.points) || el.points.length < 2 || !el.points.slice(0, 2).every((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y))) {
+      console.warn("Skipping malformed", type, "element with invalid points:", el.id);
+      return null;
+    }
     const [p1, p2] = el.points;
     const isArrow = type === "arrow";
     // Every arrow is routed the same way now (no more separate "straight"
@@ -2779,7 +2812,10 @@ export default function Whiteboard({ board, boardList }) {
       try {
         const text = await file.text();
         const parsed = JSON.parse(text);
-        if (!Array.isArray(parsed.elements)) throw new Error("bad format");
+        if (!isScriblicExport(parsed)) {
+          setToast("This doesn't look like a Scriblic export — only Scriblic's own Save As files can be imported");
+          return;
+        }
         const created = await addProject(parsed.name || file.name.replace(/\.json$/i, ""));
         if (created) {
           await fetch(`/api/boards/${created.id}`, {
